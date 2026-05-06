@@ -42,7 +42,6 @@ COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/clie
 
 # Script de migración (usa PrismaClient, no el CLI)
 COPY --from=builder /app/scripts ./scripts
-COPY --from=builder /app/node_modules/@prisma/internals ./node_modules/@prisma/internals
 
 # Next.js standalone output (incluye su propio node_modules mínimo)
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
