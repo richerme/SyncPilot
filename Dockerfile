@@ -36,12 +36,15 @@ RUN adduser --system --uid 1001 nextjs
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/prisma ./prisma
 
-# Prisma runtime + CLI completo para poder correr migraciones al arrancar
+# Prisma Client runtime (NO incluye CLI para evitar dependencia de 'effect')
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/client
 
-# Next.js standalone output
+# Script de migración (usa PrismaClient, no el CLI)
+COPY --from=builder /app/scripts ./scripts
+COPY --from=builder /app/node_modules/@prisma/internals ./node_modules/@prisma/internals
+
+# Next.js standalone output (incluye su propio node_modules mínimo)
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
@@ -55,6 +58,5 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 ENV UPLOAD_DIR=/uploads
 
-# db push sincroniza el schema sin necesitar archivos de migración
-# El || true asegura que el server arranque aunque db push falle
-CMD ["sh", "-c", "node /app/node_modules/prisma/build/index.js db push --accept-data-loss --skip-generate 2>&1 || echo '[WARN] db push falló, continuando...'; node server.js"]
+# Migrar BD con script propio (no usa CLI de Prisma → no requiere 'effect')
+CMD ["sh", "-c", "node /app/scripts/migrate.cjs 2>&1; node server.js"]
