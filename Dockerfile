@@ -56,4 +56,5 @@ ENV HOSTNAME="0.0.0.0"
 ENV UPLOAD_DIR=/uploads
 
 # db push sincroniza el schema sin necesitar archivos de migración
-CMD ["sh", "-c", "node /app/node_modules/prisma/build/index.js db push --accept-data-loss && node server.js"]
+# El || true asegura que el server arranque aunque db push falle
+CMD ["sh", "-c", "node /app/node_modules/prisma/build/index.js db push --accept-data-loss --skip-generate 2>&1 || echo '[WARN] db push falló, continuando...'; node server.js"]
