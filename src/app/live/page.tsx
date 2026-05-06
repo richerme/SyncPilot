@@ -28,6 +28,12 @@ export default function LivePage() {
   const [docCount,     setDocCount]     = useState(0)
   const [showDebug,    setShowDebug]    = useState(false)
 
+  // Live Translator state (loaded from localStorage)
+  const [liveTranslatorEnabled, setLiveTranslatorEnabled] = useState(false)
+  const [liveTranslatorLang, setLiveTranslatorLang]       = useState('es')
+  const [translations, setTranslations] = useState<Record<string, string>>({})
+  const translatingRef = useRef<Set<string>>(new Set())
+
   const transcriptRef     = useRef<HTMLDivElement>(null)
   const suggestRef        = useRef<HTMLDivElement>(null)
   const atBottomSuggest   = useRef(true)
@@ -37,8 +43,33 @@ export default function LivePage() {
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (d?.count > 0) { setDocCount(d.count); session.setDocumentContext(d.context) } })
       .catch(() => {})
+    // Cargar config de Live Translator desde localStorage
+    try {
+      setLiveTranslatorEnabled(localStorage.getItem('syncpilot_live_translator_enabled') === 'true')
+      setLiveTranslatorLang(localStorage.getItem('syncpilot_live_translator_lang') ?? 'es')
+    } catch { /* ignore */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Traducir nuevos segmentos si Live Translator está activo
+  useEffect(() => {
+    if (!liveTranslatorEnabled || session.transcript.length === 0) return
+    const last = session.transcript[session.transcript.length - 1]
+    if (!last || translatingRef.current.has(last.id) || translations[last.id]) return
+    if (last.text.split(' ').length < 3) return  // segmentos muy cortos no se traducen
+    translatingRef.current.add(last.id)
+    fetch('/api/audio-tools/translate-segment', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: last.text, target_lang: liveTranslatorLang }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d?.translated) setTranslations(prev => ({ ...prev, [last.id]: d.translated }))
+      })
+      .catch(() => {})
+      .finally(() => { translatingRef.current.delete(last.id) })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.transcript.length, liveTranslatorEnabled])
 
   // Auto-scroll transcript
   useEffect(() => {
@@ -92,6 +123,12 @@ export default function LivePage() {
             <span className="text-xs px-2 py-0.5 rounded-full font-medium"
               style={{ background: 'rgb(99 102 241/0.15)', color: '#818CF8', border: '1px solid rgb(99 102 241/0.3)' }}>
               📄 {docCount} doc{docCount > 1 ? 's' : ''}
+            </span>
+          )}
+          {liveTranslatorEnabled && (
+            <span className="text-xs px-2 py-0.5 rounded-full font-medium flex items-center gap-1"
+              style={{ background: 'rgba(6,182,212,0.15)', color: '#06B6D4', border: '1px solid rgba(6,182,212,0.3)' }}>
+              🌐 Trad. {liveTranslatorLang.toUpperCase()}
             </span>
           )}
 
@@ -171,6 +208,12 @@ export default function LivePage() {
                       </span>
                     )}
                     <span className="text-sm" style={{ color: sp.color }}>{seg.text}</span>
+                    {liveTranslatorEnabled && translations[seg.id] && (
+                      <span className="text-xs italic ml-1 opacity-70 block mt-0.5"
+                        style={{ color: '#06B6D4' }}>
+                        🌐 {translations[seg.id]}
+                      </span>
+                    )}
                   </div>
                 )
               })

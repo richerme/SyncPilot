@@ -8,6 +8,7 @@ export const config = {
     '/meetings/:path*',
     '/live/:path*',
     '/documents/:path*',
+    '/audio-tools/:path*',
     '/settings/:path*',
   ],
 }

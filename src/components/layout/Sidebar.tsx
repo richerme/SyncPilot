@@ -5,12 +5,13 @@ import { usePathname } from 'next/navigation'
 import { signOut } from 'next-auth/react'
 
 const NAV = [
-  { href: '/dashboard',   label: 'Dashboard',      icon: '⚡' },
-  { href: '/record',      label: 'Grabar',          icon: '⏺' },
-  { href: '/recordings',  label: 'Mis Grabaciones', icon: '🎬' },
-  { href: '/live',        label: 'IA en Vivo',      icon: '🧠' },
-  { href: '/meetings',    label: 'Reuniones',       icon: '📋' },
-  { href: '/documents',   label: 'Documentos',      icon: '📄' },
+  { href: '/dashboard',    label: 'Dashboard',        icon: '⚡' },
+  { href: '/record',       label: 'Grabar',            icon: '⏺' },
+  { href: '/recordings',   label: 'Mis Grabaciones',   icon: '🎬' },
+  { href: '/live',         label: 'IA en Vivo',        icon: '🧠' },
+  { href: '/meetings',     label: 'Reuniones',         icon: '📋' },
+  { href: '/audio-tools',  label: 'Voice AI',          icon: '🎙️', badge: 'NEW' },
+  { href: '/documents',    label: 'Documentos',        icon: '📄' },
 ]
 
 export default function Sidebar() {
@@ -39,7 +40,13 @@ export default function Sidebar() {
             href={item.href}
             className={`nav-link ${pathname === item.href || pathname.startsWith(item.href + '/') ? 'active' : ''}`}>
             <span className="text-base">{item.icon}</span>
-            <span>{item.label}</span>
+            <span className="flex-1">{item.label}</span>
+            {'badge' in item && item.badge && (
+              <span className="text-[9px] font-bold px-1 py-0.5 rounded"
+                style={{ background: 'linear-gradient(135deg,#6366F1,#06B6D4)', color: 'white' }}>
+                {item.badge}
+              </span>
+            )}
           </Link>
         ))}
       </nav>
