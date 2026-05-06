@@ -9,15 +9,17 @@ RUN apk add --no-cache libc6-compat
 WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY prisma ./prisma/
-RUN npm ci
+# NODE_ENV= fuerza instalación de devDependencies (requeridas para el build)
+RUN NODE_ENV= npm ci
 
 # --- Stage 2: Build ---
 FROM node:20-alpine AS builder
 WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npx prisma generate
-RUN npm run build
+RUN NODE_ENV=production npm run build
 
 # --- Stage 3: Production ---
 FROM node:20-alpine AS runner
