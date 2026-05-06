@@ -35,8 +35,11 @@ RUN adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/prisma ./prisma
+
+# Prisma runtime + CLI completo para poder correr migraciones al arrancar
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
 
 # Next.js standalone output
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
@@ -52,5 +55,5 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 ENV UPLOAD_DIR=/uploads
 
-# Ejecutar migraciones y arrancar
-CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+# db push sincroniza el schema sin necesitar archivos de migración
+CMD ["sh", "-c", "node /app/node_modules/prisma/build/index.js db push --accept-data-loss && node server.js"]
