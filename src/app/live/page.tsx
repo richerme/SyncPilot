@@ -2,56 +2,57 @@
 
 import { useLiveSession } from '@/features/live/hooks/useLiveSession'
 import { useEffect, useRef, useState } from 'react'
+import RecordingStatusBar from '@/components/layout/RecordingStatusBar'
 
-function formatDuration(secs: number) {
+function fmtDuration(secs: number) {
   const h = Math.floor(secs / 3600)
   const m = Math.floor((secs % 3600) / 60).toString().padStart(2, '0')
   const s = (secs % 60).toString().padStart(2, '0')
   return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`
 }
 
-const SUGGESTION_ICONS: Record<string, string> = {
-  reply: '💬', question: '❓', info: 'ℹ️', warning: '⚠️',
-}
-const SUGGESTION_COLORS: Record<string, string> = {
-  reply: '#6366F1', question: '#06B6D4', info: '#10B981', warning: '#F59E0B',
+const ICONS:  Record<string, string> = { reply: '💬', question: '❓', info: 'ℹ️', warning: '⚠️' }
+const COLORS: Record<string, string> = { reply: '#6366F1', question: '#06B6D4', info: '#10B981', warning: '#F59E0B' }
+
+// Colores de speaker
+const SPEAKER_STYLES = {
+  me:      { color: '#818CF8', label: 'Tú' },       // Índigo (voz propia)
+  meeting: { color: '#e2e8f0', label: 'Reunión' },  // Blanco (audio de reunión)
+  null:    { color: '#e2e8f0', label: '' },
 }
 
 export default function LivePage() {
   const session = useLiveSession()
   const [customPrompt, setCustomPrompt] = useState('')
-  const [isAskingAI, setIsAskingAI] = useState(false)
-  const [docCount, setDocCount] = useState(0)
-  const [showDebug, setShowDebug] = useState(false)
-  const transcriptScrollRef = useRef<HTMLDivElement>(null)
-  const suggestionsScrollRef = useRef<HTMLDivElement>(null)
-  const isSuggestionsAtBottom = useRef(true)
+  const [isAskingAI,   setIsAskingAI]   = useState(false)
+  const [docCount,     setDocCount]     = useState(0)
+  const [showDebug,    setShowDebug]    = useState(false)
 
-  // Cargar documentos de contexto
+  const transcriptRef     = useRef<HTMLDivElement>(null)
+  const suggestRef        = useRef<HTMLDivElement>(null)
+  const atBottomSuggest   = useRef(true)
+
   useEffect(() => {
     fetch('/api/documents/content')
       .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data?.count > 0) { setDocCount(data.count); session.setDocumentContext(data.context) }
-      })
+      .then(d => { if (d?.count > 0) { setDocCount(d.count); session.setDocumentContext(d.context) } })
       .catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Auto-scroll transcript
   useEffect(() => {
-    const c = transcriptScrollRef.current
+    const c = transcriptRef.current
     if (c) c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' })
   }, [session.transcript.length, session.interimText])
 
-  // Auto-scroll sugerencias
+  // Auto-scroll suggestions
   useEffect(() => {
-    const c = suggestionsScrollRef.current
+    const c = suggestRef.current
     if (!c) return
     setTimeout(() => {
-      if (isSuggestionsAtBottom.current || session.suggestions.length <= 3) {
+      if (atBottomSuggest.current || session.suggestions.length <= 3)
         c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' })
-      }
     }, 100)
   }, [session.suggestions.length])
 
@@ -72,8 +73,11 @@ export default function LivePage() {
     <div className="h-screen flex flex-col overflow-hidden"
       style={{ background: 'var(--color-bg)', color: 'var(--color-text)' }}>
 
-      {/* Topbar */}
-      <header className="flex items-center justify-between px-6 py-4 border-b"
+      {/* Recording bar */}
+      <RecordingStatusBar />
+
+      {/* Header */}
+      <header className="flex items-center justify-between px-6 py-3 border-b flex-shrink-0"
         style={{ borderColor: 'var(--color-surface-border)', background: 'var(--color-bg-card)' }}>
         <div className="flex items-center gap-3">
           <div className="w-7 h-7 rounded-lg flex items-center justify-center"
@@ -86,7 +90,7 @@ export default function LivePage() {
 
           {docCount > 0 && (
             <span className="text-xs px-2 py-0.5 rounded-full font-medium"
-              style={{ background: 'rgb(99 102 241 / 0.15)', color: '#818CF8', border: '1px solid rgb(99 102 241 / 0.3)' }}>
+              style={{ background: 'rgb(99 102 241/0.15)', color: '#818CF8', border: '1px solid rgb(99 102 241/0.3)' }}>
               📄 {docCount} doc{docCount > 1 ? 's' : ''}
             </span>
           )}
@@ -94,7 +98,7 @@ export default function LivePage() {
           {isActive && (
             <div className="flex items-center gap-2 ml-4">
               <div className="recording-dot" />
-              <span className="text-xs font-mono font-bold text-red-400">{formatDuration(session.duration)}</span>
+              <span className="text-xs font-mono font-bold text-red-400">{fmtDuration(session.duration)}</span>
             </div>
           )}
         </div>
@@ -105,14 +109,14 @@ export default function LivePage() {
               <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
                 {session.wordCount.toLocaleString()} palabras
               </span>
-              <span className="text-xs px-2 py-1 rounded-full flex items-center gap-1"
-                style={{ background: 'rgb(16 185 129 / 0.1)', color: '#10B981' }}>
-                <span className={`w-1.5 h-1.5 rounded-full bg-green-400 ${session.isListening ? 'animate-pulse' : ''}`} />
-                {session.isListening ? '🎧 Pestaña + Mic' : 'En pausa'}
+              <span className="text-xs px-2 py-1 rounded-full flex items-center gap-1.5"
+                style={{ background: session.audioTracksOk ? 'rgb(16 185 129/0.1)' : 'rgb(245 158 11/0.1)', color: session.audioTracksOk ? '#10B981' : '#F59E0B' }}>
+                <span className={`w-1.5 h-1.5 rounded-full ${session.audioTracksOk ? 'bg-green-400 animate-pulse' : 'bg-amber-400'}`} />
+                {session.audioTracksOk ? '🎧 Pestaña + Mic' : '🎙️ Solo Mic'}
               </span>
             </>
           )}
-          <a href="/dashboard" className="text-xs px-3 py-1.5 rounded-lg transition-all"
+          <a href="/dashboard" className="text-xs px-3 py-1.5 rounded-lg"
             style={{ background: 'var(--color-surface)', color: 'var(--color-text-secondary)' }}>
             ← Dashboard
           </a>
@@ -122,19 +126,24 @@ export default function LivePage() {
       {/* Main */}
       <div className="flex-1 flex overflow-hidden">
 
-        {/* Transcript */}
+        {/* Columna transcript */}
         <div className="flex-1 flex flex-col border-r" style={{ borderColor: 'var(--color-surface-border)' }}>
-          <div className="flex items-center justify-between px-4 py-3 border-b"
+          <div className="flex items-center justify-between px-4 py-2.5 border-b text-sm font-semibold text-white"
             style={{ borderColor: 'var(--color-surface-border)' }}>
-            <h2 className="text-sm font-semibold text-white">Transcripción en vivo</h2>
-            {session.transcript.length > 0 && (
-              <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                {session.transcript.length} fragmentos
-              </span>
-            )}
+            <span>Transcripción en vivo</span>
+            <div className="flex items-center gap-3 text-xs" style={{ color: 'var(--color-text-muted)' }}>
+              {session.transcript.length > 0 && <span>{session.transcript.length} fragmentos</span>}
+              {/* Leyenda de colores */}
+              {isActive && (
+                <div className="flex items-center gap-2">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-400 inline-block" />Tú</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-slate-300 inline-block" />Reunión</span>
+                </div>
+              )}
+            </div>
           </div>
 
-          <div ref={transcriptScrollRef} className="flex-1 overflow-y-auto p-4 space-y-2">
+          <div ref={transcriptRef} className="flex-1 overflow-y-auto p-4 space-y-1.5">
             {session.transcript.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center py-16">
                 <div className="text-4xl mb-3">🎙️</div>
@@ -142,32 +151,45 @@ export default function LivePage() {
                   {isIdle ? 'Inicia la sesión para comenzar' : isActive ? 'Escuchando...' : 'Sin transcripción'}
                 </p>
                 <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
-                  {isActive ? 'Habla durante la reunión. La transcripción aparecerá aquí.' : 'Usa Chrome o Edge.'}
+                  {isActive ? 'Tu voz aparece en azul, el audio de reunión en blanco.'
+                    : 'Usa Chrome o Edge. La reunión debe estar en una pestaña del navegador.'}
                 </p>
               </div>
             ) : (
-              session.transcript.map((seg, i) => (
-                <div key={seg.id}
-                  className={`transcript-line ${i === session.transcript.length - 1 ? 'active' : ''}`}>
-                  <span className="text-xs mr-2 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-                    {formatDuration(Math.round(seg.start_ms / 1000))}
-                  </span>
-                  <span className="text-sm text-white">{seg.text}</span>
-                </div>
-              ))
+              session.transcript.map((seg, i) => {
+                const sp = SPEAKER_STYLES[seg.speaker ?? 'null'] ?? SPEAKER_STYLES['meeting']
+                return (
+                  <div key={seg.id}
+                    className={`transcript-line ${i === session.transcript.length - 1 ? 'active' : ''}`}>
+                    <span className="text-xs mr-1.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+                      {fmtDuration(Math.round(seg.start_ms / 1000))}
+                    </span>
+                    {seg.speaker && (
+                      <span className="text-xs font-semibold mr-1.5 flex-shrink-0"
+                        style={{ color: sp.color }}>
+                        {sp.label}:
+                      </span>
+                    )}
+                    <span className="text-sm" style={{ color: sp.color }}>{seg.text}</span>
+                  </div>
+                )
+              })
             )}
+
+            {/* Interim (preview en tiempo real de la voz del usuario) */}
             {isActive && session.interimText && (
-              <div className="transcript-line active opacity-70">
-                <span className="text-xs mr-2" style={{ color: 'var(--color-text-muted)' }}>•••</span>
-                <span className="text-sm text-white italic">{session.interimText}</span>
+              <div className="transcript-line active opacity-60">
+                <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
+                <span className="text-xs font-semibold mr-1.5" style={{ color: '#818CF8' }}>Tú:</span>
+                <span className="text-sm italic" style={{ color: '#818CF8' }}>{session.interimText}</span>
               </div>
             )}
           </div>
         </div>
 
-        {/* Copiloto IA */}
+        {/* Columna Copiloto */}
         <div className="w-80 flex flex-col" style={{ background: 'var(--color-bg-card)' }}>
-          <div className="flex items-center justify-between px-4 py-3 border-b"
+          <div className="flex items-center justify-between px-4 py-2.5 border-b"
             style={{ borderColor: 'var(--color-surface-border)' }}>
             <div className="flex items-center gap-2">
               <div className="w-5 h-5 rounded-md flex items-center justify-center"
@@ -185,35 +207,31 @@ export default function LivePage() {
             )}
           </div>
 
-          <div ref={suggestionsScrollRef}
+          <div ref={suggestRef}
             onScroll={() => {
-              const c = suggestionsScrollRef.current
-              if (c) isSuggestionsAtBottom.current = c.scrollHeight - c.scrollTop - c.clientHeight < 50
+              const c = suggestRef.current
+              if (c) atBottomSuggest.current = c.scrollHeight - c.scrollTop - c.clientHeight < 50
             }}
             className="flex-1 overflow-y-auto p-3 space-y-2">
-            {session.suggestions.length === 0 ? (
-              <div className="text-center py-8">
-                <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                  {isActive ? 'Las sugerencias aparecerán automáticamente...' : 'Inicia la sesión para recibir sugerencias'}
-                </p>
-              </div>
-            ) : (
-              session.suggestions.map((s, i) => (
+            {session.suggestions.length === 0
+              ? <p className="text-center py-8 text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                {isActive ? 'Las sugerencias aparecerán automáticamente...' : 'Inicia la sesión para recibir sugerencias'}
+              </p>
+              : session.suggestions.map((s, i) => (
                 <div key={s.id ?? i} className={`suggestion-card type-${s.type} animate-slide-up`}>
                   <div className="flex items-start gap-2">
-                    <span className="text-base flex-shrink-0">{SUGGESTION_ICONS[s.type] ?? '💡'}</span>
+                    <span className="text-base flex-shrink-0">{ICONS[s.type] ?? '💡'}</span>
                     <p className="text-xs text-white leading-relaxed">{s.text}</p>
                   </div>
                   <div className="flex justify-end mt-2">
                     <button onClick={() => navigator.clipboard.writeText(s.text)}
                       className="text-xs opacity-60 hover:opacity-100 transition-opacity"
-                      style={{ color: SUGGESTION_COLORS[s.type] ?? '#818CF8' }}>
+                      style={{ color: COLORS[s.type] ?? '#818CF8' }}>
                       Copiar ↗
                     </button>
                   </div>
                 </div>
-              ))
-            )}
+              ))}
           </div>
 
           {isActive && (
@@ -236,7 +254,7 @@ export default function LivePage() {
 
           {session.error && (
             <div className="mx-3 mb-3 p-3 rounded-lg text-xs"
-              style={{ background: 'rgb(239 68 68 / 0.1)', border: '1px solid rgb(239 68 68/0.3)', color: '#F87171' }}>
+              style={{ background: 'rgb(239 68 68/0.1)', border: '1px solid rgb(239 68 68/0.3)', color: '#F87171' }}>
               {session.error}
             </div>
           )}
@@ -244,27 +262,27 @@ export default function LivePage() {
       </div>
 
       {/* Footer */}
-      <footer className="px-6 py-4 border-t flex items-center justify-center gap-4"
+      <footer className="px-6 py-4 border-t flex items-center justify-center gap-4 flex-shrink-0"
         style={{ borderColor: 'var(--color-surface-border)', background: 'var(--color-bg-card)' }}>
 
         {isIdle && (
-          <div className="flex flex-col items-center gap-3 w-full max-w-lg">
-            {/* Info */}
-            <div className="text-xs text-left space-y-2 p-4 rounded-xl border w-full"
+          <div className="flex flex-col items-center gap-3 w-full max-w-xl">
+            {/* Instrucciones */}
+            <div className="w-full p-4 rounded-xl border text-xs space-y-2"
               style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
-              <p className="font-semibold text-white flex items-center gap-2">
-                <span>🎧</span> Reunión Completa — Pestaña + Micrófono
+              <p className="font-semibold text-white text-sm">🎧 Reunión Completa — Cómo usarlo</p>
+              <p style={{ color: 'var(--color-text-secondary)' }}>
+                <strong style={{ color: '#10B981' }}>Paso 1:</strong> Abre tu reunión (Teams, Zoom, Meet) en <strong>una pestaña del navegador</strong> (versión web).
               </p>
               <p style={{ color: 'var(--color-text-secondary)' }}>
-                Captura el audio de la reunión (pestaña del navegador) más tu voz (micrófono). Funciona con Teams Web, Zoom Web, Google Meet, etc.
+                <strong style={{ color: '#10B981' }}>Paso 2:</strong> Al hacer clic en &quot;Iniciar&quot;, selecciona esa <strong>pestaña</strong> en el diálogo del navegador y activa <strong>✓ Compartir audio de la pestaña</strong>.
               </p>
-              <p style={{ color: 'var(--color-text-muted)' }}>
-                Tip: Al compartir pantalla, selecciona la <strong>pestaña</strong> donde está la reunión y marca &quot;Compartir audio de la pestaña&quot;.
+              <p style={{ color: 'var(--color-text-secondary)' }}>
+                <strong style={{ color: '#818CF8' }}>Tu voz</strong> aparecerá en <span style={{ color: '#818CF8' }}>azul</span> (instantáneo via micrófono) · <strong>Otros</strong> aparecerán en <span style={{ color: '#e2e8f0' }}>blanco</span> (audio de pestaña, ~2s de delay).
               </p>
             </div>
 
-            <button onClick={session.startSession}
-              className="btn-primary flex items-center gap-2 px-8 py-3">
+            <button onClick={session.startSession} className="btn-primary flex items-center gap-2 px-8 py-3">
               <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
@@ -291,10 +309,8 @@ export default function LivePage() {
             </button>
             <button onClick={session.endSession}
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all"
-              style={{ background: 'rgb(239 68 68 / 0.2)', border: '1px solid rgb(239 68 68/0.4)', color: '#EF4444' }}>
-              <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24">
-                <rect x="4" y="4" width="16" height="16" rx="2" />
-              </svg>
+              style={{ background: 'rgb(239 68 68/0.2)', border: '1px solid rgb(239 68 68/0.4)', color: '#EF4444' }}>
+              <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
               Finalizar sesión
             </button>
           </>
@@ -303,10 +319,9 @@ export default function LivePage() {
         {isDone && (
           <div className="flex items-center gap-4">
             <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-              ✓ Sesión finalizada · {session.wordCount.toLocaleString()} palabras · {formatDuration(session.duration)}
+              ✓ Sesión finalizada · {session.wordCount.toLocaleString()} palabras · {fmtDuration(session.duration)}
             </p>
-            <button onClick={session.resetSession}
-              className="text-sm px-5 py-2 rounded-lg font-semibold"
+            <button onClick={session.resetSession} className="text-sm px-5 py-2 rounded-lg font-semibold"
               style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
               Nueva sesión
             </button>
@@ -315,18 +330,18 @@ export default function LivePage() {
         )}
       </footer>
 
-      {/* Debug Panel */}
-      <div className="border-t" style={{ borderColor: 'var(--color-surface-border)' }}>
+      {/* Debug */}
+      <div className="border-t flex-shrink-0" style={{ borderColor: 'var(--color-surface-border)' }}>
         <button onClick={() => setShowDebug(p => !p)}
-          className="w-full text-left px-4 py-1.5 text-xs font-mono"
+          className="w-full text-left px-4 py-1 text-xs font-mono"
           style={{ color: 'var(--color-text-muted)', background: 'rgba(0,0,0,0.3)' }}>
-          {showDebug ? '▼' : '▶'} Debug Logs ({session.debugLogs.length})
+          {showDebug ? '▼' : '▶'} Debug ({session.debugLogs.length})
         </button>
         {showDebug && (
-          <div className="max-h-48 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5"
+          <div className="max-h-32 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5"
             style={{ background: 'rgba(0,0,0,0.5)', color: '#86efac' }}>
             {session.debugLogs.length === 0
-              ? <p className="text-slate-500">No logs yet.</p>
+              ? <p className="text-slate-500">Sin logs.</p>
               : session.debugLogs.map((log, i) => (
                 <p key={i} className={log.includes('ERROR') ? 'text-red-400' : log.includes('SKIPPED') ? 'text-amber-400' : ''}>
                   {log}

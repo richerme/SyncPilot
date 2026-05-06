@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import Link from 'next/link'
+import RecordingStatusBar from '@/components/layout/RecordingStatusBar'
 
 interface Recording {
   id: string; title: string; description: string | null; slug: string; status: string
@@ -14,7 +15,7 @@ interface AiSummary { summaryText: string; keyPoints: string[]; sentiment: strin
 interface ActionItem { id: string; text: string; assignee: string | null; dueDateText: string | null; isCompleted: boolean }
 interface Comment { id: string; timestampMs: number; text: string; guestName: string | null; createdAt: string; authorName: string | null }
 
-function formatDuration(secs: number) {
+function fmtTime(secs: number) {
   return `${Math.floor(secs / 60).toString().padStart(2, '0')}:${(secs % 60).toString().padStart(2, '0')}`
 }
 function formatDate(iso: string) {
@@ -30,44 +31,64 @@ export default function VideoPlayerPage({ slug, initialData }: {
     aiSummary: AiSummary | null; actionItems: ActionItem[]; comments: Comment[]
   }
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const videoRef    = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const [currentMs, setCurrentMs] = useState(0)
-  const [isPlaying, setIsPlaying] = useState(false)
+  const progressRef  = useRef<HTMLDivElement>(null)
+
+  const [currentMs, setCurrentMs]     = useState(0)
+  const [isPlaying, setIsPlaying]     = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [duration, setDuration] = useState(initialData.recording.durationSecs ?? 0)
-  const [volume, setVolume] = useState(1)
-  const [isCopied, setIsCopied] = useState(false)
-  const [activeTab, setActiveTab] = useState<Tab>('transcript')
-  const [comments, setComments] = useState(initialData.comments)
-  const [speed, setSpeed] = useState(1)
-  const [newComment, setNewComment] = useState('')
-  const [guestName, setGuestName] = useState('')
+  const [duration, setDuration]       = useState(initialData.recording.durationSecs ?? 0)
+  const [isCopied, setIsCopied]       = useState(false)
+  const [activeTab, setActiveTab]     = useState<Tab>('transcript')
+  const [comments, setComments]       = useState(initialData.comments)
+  const [speed, setSpeed]             = useState(1)
+  const [newComment, setNewComment]   = useState('')
+  const [guestName, setGuestName]     = useState('')
+  const [isDragging, setIsDragging]   = useState(false)
 
   const { recording, aiSummary, actionItems } = initialData
 
-  const progressPct = duration > 0 ? Math.min(100, (currentMs / 1000 / duration) * 100) : 0
+  // ── Fix WebM Infinity duration (Chrome MediaRecorder bug) ──────────────
+  const fixInfinityDuration = useCallback((vid: HTMLVideoElement) => {
+    if (vid.duration === Infinity || isNaN(vid.duration)) {
+      vid.currentTime = 1e101
+      vid.onseeked = () => {
+        vid.onseeked = null
+        setDuration(Math.floor(vid.duration))
+        vid.currentTime = 0
+      }
+    } else if (Number.isFinite(vid.duration) && vid.duration > 0) {
+      setDuration(Math.floor(vid.duration))
+    }
+  }, [])
 
   useEffect(() => {
     const vid = videoRef.current
     if (!vid) return
-    const syncDuration = () => {
+    const onMeta   = () => fixInfinityDuration(vid)
+    const onTime   = () => {
+      setCurrentMs(vid.currentTime * 1000)
       if (Number.isFinite(vid.duration) && vid.duration > 0) setDuration(Math.floor(vid.duration))
     }
-    const onTime  = () => { setCurrentMs(vid.currentTime * 1000); syncDuration() }
-    const onPlay  = () => { setIsPlaying(true); syncDuration() }
-    const onPause = () => setIsPlaying(false)
+    const onPlay   = () => setIsPlaying(true)
+    const onPause  = () => setIsPlaying(false)
+    const onEnded  = () => setIsPlaying(false)
+    vid.addEventListener('loadedmetadata', onMeta)
+    vid.addEventListener('durationchange', onMeta)
     vid.addEventListener('timeupdate', onTime)
-    vid.addEventListener('loadedmetadata', syncDuration)
     vid.addEventListener('play', onPlay)
     vid.addEventListener('pause', onPause)
+    vid.addEventListener('ended', onEnded)
     return () => {
+      vid.removeEventListener('loadedmetadata', onMeta)
+      vid.removeEventListener('durationchange', onMeta)
       vid.removeEventListener('timeupdate', onTime)
-      vid.removeEventListener('loadedmetadata', syncDuration)
       vid.removeEventListener('play', onPlay)
       vid.removeEventListener('pause', onPause)
+      vid.removeEventListener('ended', onEnded)
     }
-  }, [])
+  }, [fixInfinityDuration])
 
   useEffect(() => {
     const onFsChange = () => setIsFullscreen(!!document.fullscreenElement)
@@ -75,15 +96,20 @@ export default function VideoPlayerPage({ slug, initialData }: {
     return () => document.removeEventListener('fullscreenchange', onFsChange)
   }, [])
 
+  // ── Video controls ────────────────────────────────────────────────────
   const seekToMs = useCallback((ms: number) => {
-    if (!videoRef.current) return
-    videoRef.current.currentTime = ms / 1000
-    videoRef.current.play()
-  }, [])
+    const vid = videoRef.current
+    if (!vid) return
+    const clampedMs = Math.max(0, Math.min(ms, (vid.duration || duration) * 1000))
+    vid.currentTime = clampedMs / 1000
+    setCurrentMs(clampedMs)
+    vid.play().catch(() => {})
+  }, [duration])
 
   const togglePlay = useCallback(() => {
-    if (!videoRef.current) return
-    isPlaying ? videoRef.current.pause() : videoRef.current.play()
+    const vid = videoRef.current
+    if (!vid) return
+    isPlaying ? vid.pause() : vid.play()
   }, [isPlaying])
 
   const toggleFullscreen = useCallback(() => {
@@ -92,7 +118,23 @@ export default function VideoPlayerPage({ slug, initialData }: {
     document.fullscreenElement ? document.exitFullscreen() : c.requestFullscreen()
   }, [])
 
-  const activeSegment = useMemo(() =>
+  // ── Progress bar click & drag ─────────────────────────────────────────
+  const seekFromEvent = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const bar = progressRef.current
+    const vid = videoRef.current
+    if (!bar || !vid) return
+    const rect = bar.getBoundingClientRect()
+    const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    const realDuration = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : duration
+    if (realDuration > 0) seekToMs(pct * realDuration * 1000)
+  }, [duration, seekToMs])
+
+  const progressPct = useMemo(() => {
+    const d = duration > 0 ? duration : 1
+    return Math.min(100, (currentMs / 1000 / d) * 100)
+  }, [currentMs, duration])
+
+  const activeSegIdx = useMemo(() =>
     initialData.transcripts.findIndex(t => currentMs >= t.startMs && currentMs <= t.endMs),
     [currentMs, initialData.transcripts]
   )
@@ -119,6 +161,10 @@ export default function VideoPlayerPage({ slug, initialData }: {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--color-bg)' }}>
+      {/* Recording bar */}
+      <RecordingStatusBar />
+
+      {/* Header */}
       <header className="border-b px-6 py-3 flex items-center justify-between"
         style={{ borderColor: 'var(--color-surface-border)', background: 'var(--color-bg-card)' }}>
         <Link href="/dashboard" className="flex items-center gap-2">
@@ -137,7 +183,8 @@ export default function VideoPlayerPage({ slug, initialData }: {
               Mis grabaciones
             </Link>
           )}
-          <button onClick={() => { navigator.clipboard.writeText(window.location.href); setIsCopied(true); setTimeout(() => setIsCopied(false), 2000) }}
+          <button
+            onClick={() => { navigator.clipboard.writeText(window.location.href); setIsCopied(true); setTimeout(() => setIsCopied(false), 2000) }}
             className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium transition-all"
             style={{
               background: isCopied ? 'rgb(16 185 129/0.2)' : 'var(--color-surface)',
@@ -160,11 +207,10 @@ export default function VideoPlayerPage({ slug, initialData }: {
                 className="w-full h-full object-contain" onClick={togglePlay} style={{ cursor: 'pointer' }} />
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-8 text-center">
-                <div className="text-4xl">🎬</div>
+                <div className="text-4xl">{recording.status === 'uploading' || recording.status === 'processing' ? '⏳' : '🎬'}</div>
                 <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
                   {recording.status === 'uploading' ? 'Video en proceso de carga...'
-                    : recording.status === 'processing' ? 'Procesando video...'
-                    : 'Video no disponible'}
+                    : recording.status === 'processing' ? 'Procesando video...' : 'Video no disponible'}
                 </p>
               </div>
             )}
@@ -175,25 +221,45 @@ export default function VideoPlayerPage({ slug, initialData }: {
                 className="absolute inset-0 flex items-center justify-center bg-transparent group-hover:bg-black/20 transition-all z-10">
                 <div className="w-16 h-16 rounded-full flex items-center justify-center hover:scale-110 transition-transform"
                   style={{ background: 'rgb(255 255 255 / 0.9)' }}>
-                  <svg width="28" height="28" fill="#1a1a2e" viewBox="0 0 24 24">
-                    <polygon points="5 3 19 12 5 21 5 3" />
-                  </svg>
+                  <svg width="28" height="28" fill="#1a1a2e" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3" /></svg>
                 </div>
               </button>
             )}
 
-            {/* Controls */}
+            {/* Controls overlay */}
             {recording.videoUrl && (
-              <div className={`absolute bottom-0 left-0 right-0 p-4 pt-16 space-y-3 bg-gradient-to-t from-black/90 via-black/40 to-transparent transition-opacity z-20 ${isPlaying ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
-                {/* Progress */}
-                <div className="relative h-1.5 rounded-full cursor-pointer bg-white/30 hover:h-2 transition-all"
-                  onClick={e => {
-                    const rect = e.currentTarget.getBoundingClientRect()
-                    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-                    seekToMs(pct * (videoRef.current?.duration ?? duration) * 1000)
-                  }}>
-                  <div className="h-full rounded-full" style={{ width: `${progressPct}%`, background: '#EF4444' }} />
+              <div className={`absolute bottom-0 left-0 right-0 p-4 pt-12 space-y-2 bg-gradient-to-t from-black/90 via-black/40 to-transparent transition-opacity z-20 ${isPlaying ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
+
+                {/* ── Progress bar ── */}
+                <div
+                  ref={progressRef}
+                  className="relative h-1.5 rounded-full cursor-pointer bg-white/25 hover:h-2.5 transition-all"
+                  onMouseDown={e => { setIsDragging(true); seekFromEvent(e) }}
+                  onMouseMove={e => { if (isDragging) seekFromEvent(e) }}
+                  onMouseUp={() => setIsDragging(false)}
+                  onMouseLeave={() => setIsDragging(false)}
+                  onClick={seekFromEvent}
+                >
+                  {/* Chapter markers */}
+                  {initialData.chapters.map(ch => {
+                    const d = duration > 0 ? duration : 1
+                    return (
+                      <div key={ch.id} className="absolute top-0 h-full w-0.5 bg-white/40 pointer-events-none z-10"
+                        style={{ left: `${(ch.startMs / 1000 / d) * 100}%` }} />
+                    )
+                  })}
+                  {/* Fill bar — RED, tracks progress */}
+                  <div
+                    className="absolute top-0 left-0 h-full rounded-full pointer-events-none"
+                    style={{ width: `${progressPct}%`, background: '#EF4444', transition: isDragging ? 'none' : 'width 0.1s linear' }}
+                  />
+                  {/* Thumb */}
+                  <div
+                    className="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-white shadow-lg pointer-events-none opacity-0 group-hover/progress:opacity-100"
+                    style={{ left: `calc(${progressPct}% - 6px)` }}
+                  />
                 </div>
+
                 <div className="flex items-center justify-between text-white">
                   <div className="flex items-center gap-4">
                     <button onClick={togglePlay} className="w-8 h-8 flex items-center justify-center hover:scale-110 transition-transform">
@@ -202,13 +268,14 @@ export default function VideoPlayerPage({ slug, initialData }: {
                         : <svg width="18" height="18" fill="white" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3" /></svg>}
                     </button>
                     <span className="text-xs font-mono opacity-90">
-                      {formatDuration(Math.floor(currentMs / 1000))} / {formatDuration(duration)}
+                      {fmtTime(Math.floor(currentMs / 1000))} / {fmtTime(duration)}
                     </span>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="flex items-center gap-1">
                       {[0.5, 1, 1.25, 1.5, 2].map(s => (
-                        <button key={s} onClick={() => { if (videoRef.current) videoRef.current.playbackRate = s; setSpeed(s) }}
+                        <button key={s}
+                          onClick={() => { if (videoRef.current) videoRef.current.playbackRate = s; setSpeed(s) }}
                           className="text-[11px] px-1.5 py-0.5 rounded font-mono opacity-80 hover:opacity-100"
                           style={{ background: speed === s ? 'rgba(255,255,255,0.2)' : 'transparent', fontWeight: speed === s ? 700 : 400 }}>
                           {s}x
@@ -216,7 +283,7 @@ export default function VideoPlayerPage({ slug, initialData }: {
                       ))}
                     </div>
                     <button onClick={toggleFullscreen} className="w-8 h-8 flex items-center justify-center hover:scale-110 transition-transform">
-                      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                      <svg width="20" height="20" fill="none" stroke="white" strokeWidth="2.5" viewBox="0 0 24 24">
                         <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
                       </svg>
                     </button>
@@ -231,13 +298,13 @@ export default function VideoPlayerPage({ slug, initialData }: {
             <div className="flex items-center gap-3 flex-wrap text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
               <span>{recording.authorName ?? 'Usuario'}</span>
               <span>· {recording.viewCount} vistas</span>
-              {recording.durationSecs && <span>· {formatDuration(recording.durationSecs)}</span>}
+              {duration > 0 && <span>· {fmtTime(duration)}</span>}
               <span>· {formatDate(recording.createdAt)}</span>
             </div>
           </div>
         </div>
 
-        {/* Sidebar */}
+        {/* Sidebar tabs */}
         <div className="w-80 flex-shrink-0 space-y-3">
           <div className="flex gap-1 p-1 rounded-xl" style={{ background: 'var(--color-surface)' }}>
             {TABS.map(t => (
@@ -250,63 +317,45 @@ export default function VideoPlayerPage({ slug, initialData }: {
           </div>
 
           <div className="card p-4 max-h-[600px] overflow-y-auto">
-            {/* Transcript Tab */}
             {activeTab === 'transcript' && (
               <div className="space-y-1">
-                {initialData.transcripts.length === 0 ? (
-                  <p className="text-sm text-center py-8" style={{ color: 'var(--color-text-muted)' }}>
-                    Usa &quot;Procesar con IA&quot; para generar la transcripción
-                  </p>
-                ) : (
-                  initialData.transcripts.map((seg, i) => (
+                {initialData.transcripts.length === 0
+                  ? <p className="text-sm text-center py-8" style={{ color: 'var(--color-text-muted)' }}>Usa &quot;Procesar con IA&quot; para generar la transcripción</p>
+                  : initialData.transcripts.map((seg, i) => (
                     <div key={seg.id} onClick={() => seekToMs(seg.startMs)}
-                      className={`transcript-line ${i === activeSegment ? 'active' : ''}`}>
+                      className={`transcript-line ${i === activeSegIdx ? 'active' : ''}`}>
                       <span className="text-xs mr-2 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-                        {formatDuration(Math.round(seg.startMs / 1000))}
+                        {fmtTime(Math.round(seg.startMs / 1000))}
                       </span>
-                      {seg.speaker && (
-                        <span className="text-xs font-semibold mr-1" style={{ color: '#818CF8' }}>{seg.speaker}:</span>
-                      )}
+                      {seg.speaker && <span className="text-xs font-semibold mr-1" style={{ color: '#818CF8' }}>{seg.speaker}:</span>}
                       <span className="text-sm text-white">{seg.text}</span>
                     </div>
-                  ))
-                )}
+                  ))}
               </div>
             )}
 
-            {/* Chapters Tab */}
             {activeTab === 'chapters' && (
               <div className="space-y-2">
-                {initialData.chapters.length === 0 ? (
-                  <p className="text-sm text-center py-8" style={{ color: 'var(--color-text-muted)' }}>Sin capítulos</p>
-                ) : (
-                  initialData.chapters.map(ch => (
+                {initialData.chapters.length === 0
+                  ? <p className="text-sm text-center py-8" style={{ color: 'var(--color-text-muted)' }}>Sin capítulos</p>
+                  : initialData.chapters.map(ch => (
                     <button key={ch.id} onClick={() => seekToMs(ch.startMs)}
                       className="w-full text-left p-3 rounded-lg hover:bg-white/5 transition-colors space-y-1">
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono" style={{ color: '#818CF8' }}>
-                          {formatDuration(Math.round(ch.startMs / 1000))}
-                        </span>
+                        <span className="text-xs font-mono" style={{ color: '#818CF8' }}>{fmtTime(Math.round(ch.startMs / 1000))}</span>
                         <span className="text-sm font-medium text-white">{ch.title}</span>
                       </div>
-                      {ch.summary && (
-                        <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>{ch.summary}</p>
-                      )}
+                      {ch.summary && <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>{ch.summary}</p>}
                     </button>
-                  ))
-                )}
+                  ))}
               </div>
             )}
 
-            {/* Summary Tab */}
             {activeTab === 'summary' && (
               <div className="space-y-4">
-                {!aiSummary ? (
-                  <p className="text-sm text-center py-8" style={{ color: 'var(--color-text-muted)' }}>
-                    Procesa el video con IA para obtener el resumen
-                  </p>
-                ) : (
-                  <>
+                {!aiSummary
+                  ? <p className="text-sm text-center py-8" style={{ color: 'var(--color-text-muted)' }}>Procesa el video con IA para obtener el resumen</p>
+                  : <>
                     {aiSummary.sentiment && (
                       <span className="text-xs px-2 py-0.5 rounded-full font-medium"
                         style={{
@@ -350,41 +399,35 @@ export default function VideoPlayerPage({ slug, initialData }: {
                         </ul>
                       </div>
                     )}
-                  </>
-                )}
+                  </>}
               </div>
             )}
 
-            {/* Comments Tab */}
             {activeTab === 'comments' && (
               <div className="space-y-3">
-                {comments.map(c => (
-                  <div key={c.id} className="p-2 rounded-lg space-y-1"
-                    style={{ background: 'var(--color-surface)' }}>
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => seekToMs(c.timestampMs)}
-                        className="text-xs font-mono" style={{ color: '#818CF8' }}>
-                        {formatDuration(Math.round(c.timestampMs / 1000))}
-                      </button>
-                      <span className="text-xs font-semibold text-white">{c.authorName ?? 'Anónimo'}</span>
+                {comments.length === 0
+                  ? <p className="text-sm text-center py-4" style={{ color: 'var(--color-text-muted)' }}>Sin comentarios aún</p>
+                  : comments.map(c => (
+                    <div key={c.id} className="p-2 rounded-lg space-y-1" style={{ background: 'var(--color-surface)' }}>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => seekToMs(c.timestampMs)} className="text-xs font-mono" style={{ color: '#818CF8' }}>
+                          {fmtTime(Math.round(c.timestampMs / 1000))}
+                        </button>
+                        <span className="text-xs font-semibold text-white">{c.authorName ?? 'Anónimo'}</span>
+                      </div>
+                      <p className="text-sm" style={{ color: 'var(--color-text)' }}>{c.text}</p>
                     </div>
-                    <p className="text-sm" style={{ color: 'var(--color-text)' }}>{c.text}</p>
-                  </div>
-                ))}
-
+                  ))}
                 <div className="pt-2 border-t space-y-2" style={{ borderColor: 'var(--color-surface-border)' }}>
                   <input type="text" value={guestName} onChange={e => setGuestName(e.target.value)}
                     placeholder="Tu nombre (opcional)" className="input-field text-xs py-1.5" />
                   <div className="flex gap-2">
                     <input type="text" value={newComment} onChange={e => setNewComment(e.target.value)}
                       onKeyDown={e => e.key === 'Enter' && addComment()}
-                      placeholder={`Comentar en ${formatDuration(Math.floor(currentMs / 1000))}...`}
+                      placeholder={`Comentar en ${fmtTime(Math.floor(currentMs / 1000))}...`}
                       className="input-field text-xs py-1.5 flex-1" />
-                    <button onClick={addComment}
-                      className="px-3 rounded-lg text-xs font-semibold"
-                      style={{ background: '#6366F1', color: 'white' }}>
-                      +
-                    </button>
+                    <button onClick={addComment} className="px-3 rounded-lg text-xs font-semibold"
+                      style={{ background: '#6366F1', color: 'white' }}>+</button>
                   </div>
                 </div>
               </div>
