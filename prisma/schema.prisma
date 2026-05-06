@@ -1,0 +1,251 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// Auth.js v5 — Modelos requeridos
+// ============================================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  accounts      Account[]
+  sessions      Session[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // SyncPilot relations
+  recordings       Recording[]
+  meetings         Meeting[]
+  contextDocuments ContextDocument[]
+  comments         Comment[]
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+// ============================================
+// SyncPilot — Modelos de negocio
+// ============================================
+
+model Recording {
+  id            String          @id @default(cuid())
+  userId        String
+  title         String
+  slug          String          @unique
+  description   String?
+  status        RecordingStatus @default(uploading)
+  storagePath   String?
+  durationSecs  Int?
+  fileSizeBytes BigInt?
+  isPublic      Boolean         @default(false)
+  shareToken    String          @default(cuid())
+  viewCount     Int             @default(0)
+  recordedAt    DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transcripts  Transcript[]
+  chapters     Chapter[]
+  aiSummaries  AiSummary[]
+  actionItems  ActionItem[]
+  comments     Comment[]
+}
+
+model Meeting {
+  id           String        @id @default(cuid())
+  userId       String
+  title        String?
+  status       MeetingStatus @default(active)
+  startedAt    DateTime      @default(now())
+  endedAt      DateTime?
+  durationSecs Int?
+  wordCount    Int           @default(0)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transcripts Transcript[]
+  suggestions MeetingSuggestion[]
+}
+
+model Transcript {
+  id          String   @id @default(cuid())
+  recordingId String?
+  meetingId   String?
+  startMs     Int
+  endMs       Int
+  speaker     String?
+  text        String
+  confidence  Float?
+  language    String   @default("es")
+  createdAt   DateTime @default(now())
+
+  recording Recording? @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  meeting   Meeting?   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+}
+
+model Chapter {
+  id          String   @id @default(cuid())
+  recordingId String
+  title       String
+  startMs     Int
+  endMs       Int
+  summary     String?
+  orderIndex  Int
+  createdAt   DateTime @default(now())
+
+  recording Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+}
+
+model AiSummary {
+  id           String    @id @default(cuid())
+  recordingId  String?
+  meetingId    String?
+  summaryText  String
+  keyPoints    String[]
+  sentiment    Sentiment @default(neutral)
+  modelVersion String    @default("gemini-2.5-flash-lite")
+  tokenCount   Int?
+  createdAt    DateTime  @default(now())
+
+  recording Recording? @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+}
+
+model ActionItem {
+  id           String   @id @default(cuid())
+  recordingId  String?
+  meetingId    String?
+  text         String
+  assignee     String?
+  dueDateText  String?
+  isCompleted  Boolean  @default(false)
+  startMs      Int?
+  createdAt    DateTime @default(now())
+
+  recording Recording? @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+}
+
+model Comment {
+  id          String   @id @default(cuid())
+  recordingId String
+  userId      String?
+  guestName   String?
+  guestEmail  String?
+  timestampMs Int
+  text        String
+  isResolved  Boolean  @default(false)
+  parentId    String?
+  createdAt   DateTime @default(now())
+
+  recording Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model MeetingSuggestion {
+  id          String         @id @default(cuid())
+  meetingId   String
+  timestampMs Int
+  type        SuggestionType
+  text        String
+  context     String?
+  wasUsed     Boolean        @default(false)
+  createdAt   DateTime       @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+}
+
+model ContextDocument {
+  id            String       @id @default(cuid())
+  userId        String
+  name          String
+  fileType      DocumentType
+  storagePath   String
+  fileSizeBytes BigInt?
+  extractedText String?
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ============================================
+// Enums
+// ============================================
+
+enum RecordingStatus {
+  uploading
+  processing
+  ready
+  error
+}
+
+enum MeetingStatus {
+  active
+  processing
+  done
+  error
+}
+
+enum Sentiment {
+  positive
+  neutral
+  negative
+}
+
+enum SuggestionType {
+  reply
+  question
+  info
+  warning
+}
+
+enum DocumentType {
+  pdf
+  txt
+  md
+  docx
+}

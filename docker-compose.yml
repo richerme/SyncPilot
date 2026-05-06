@@ -1,0 +1,22 @@
+# docker-compose.yml — Solo para desarrollo local
+# Levanta PostgreSQL para que Next.js se conecte via DATABASE_URL
+#
+# Uso:
+#   docker compose up -d
+#   npm run dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: myapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
