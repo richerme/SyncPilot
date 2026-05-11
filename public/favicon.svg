@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#06B6D4"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- Camera body -->
+  <rect x="9" y="22" width="32" height="22" rx="4" fill="#FFFFFF"/>
+  <!-- Camera lens -->
+  <circle cx="22" cy="33" r="7" fill="#1E1B4B"/>
+  <circle cx="22" cy="33" r="4.5" fill="#6366F1"/>
+  <!-- Viewfinder triangle -->
+  <path d="M41 28 L52 22 L52 44 L41 38 Z" fill="#FFFFFF"/>
+  <!-- Recording dot -->
+  <circle cx="35" cy="27" r="2" fill="#EF4444"/>
+  <!-- Microphone above -->
+  <rect x="46" y="8" width="8" height="13" rx="4" fill="#FFFFFF"/>
+  <path d="M42 19 Q42 25 50 25 Q58 25 58 19" fill="none" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

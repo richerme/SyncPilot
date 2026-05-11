@@ -5,6 +5,14 @@ export const metadata: Metadata = {
   title: 'SyncPilot — Grabación e IA en Vivo',
   description: 'Graba reuniones, transcribe con IA y obtén sugerencias en tiempo real',
   manifest: '/manifest.json',
+  icons: {
+    icon: [
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+      { url: '/icons/icon-192.svg', type: 'image/svg+xml', sizes: '192x192' },
+    ],
+    apple: '/icons/icon-192.svg',
+    shortcut: '/favicon.svg',
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
@@ -19,9 +27,6 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="es">
-      <head>
-        <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
-      </head>
       <body>{children}</body>
     </html>
   )

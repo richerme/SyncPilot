@@ -1,3 +1,5 @@
+import OpenAI, { toFile } from 'openai'
+
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash-lite-preview-06-17'
 
@@ -43,22 +45,40 @@ export async function chatCompletion(
   return data.choices?.[0]?.message?.content ?? ''
 }
 
-export async function transcribeAudio(audioBase64: string, mimeType: string): Promise<string> {
-  const text = await chatCompletion([
-    {
-      role: 'user',
-      content: [
-        {
-          type: 'image_url',
-          image_url: { url: `data:${mimeType.split(';')[0]};base64,${audioBase64}` },
-        },
-        {
-          type: 'text',
-          text: 'Transcribe exactly as spoken. ONLY output the spoken text, nothing else. Keep original language (Spanish/English/mixed). If silence or noise only, return: [SILENCIO].',
-        },
-      ],
-    },
-  ], { temperature: 0.05, maxTokens: 512 })
+// Transcripción real de audio usando OpenAI Whisper.
+// Whisper acepta nativamente webm/opus, mp3, wav, m4a, etc. y maneja español/inglés.
+let openaiClient: OpenAI | null = null
+function getOpenAI(): OpenAI {
+  if (!openaiClient) {
+    openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  }
+  return openaiClient
+}
 
-  return text.trim()
+export async function transcribeAudio(audioBase64: string, mimeType: string): Promise<string> {
+  if (!process.env.OPENAI_API_KEY) {
+    console.error('[transcribeAudio] OPENAI_API_KEY no configurada')
+    return ''
+  }
+
+  const buffer = Buffer.from(audioBase64, 'base64')
+  const cleanMime = mimeType.split(';')[0] || 'audio/webm'
+  const ext = cleanMime.split('/')[1] || 'webm'
+
+  try {
+    const file = await toFile(buffer, `chunk.${ext}`, { type: cleanMime })
+
+    const result = await getOpenAI().audio.transcriptions.create({
+      file,
+      model: 'whisper-1',
+      temperature: 0,
+      response_format: 'text',
+    })
+
+    const text = typeof result === 'string' ? result : (result as { text?: string }).text ?? ''
+    return text.trim()
+  } catch (err) {
+    console.error('[transcribeAudio] Whisper error:', err instanceof Error ? err.message : err)
+    return ''
+  }
 }

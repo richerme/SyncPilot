@@ -30,8 +30,11 @@ export default function LoginPage() {
       <div className="flex flex-col items-center mb-8">
         <div className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3"
           style={{ background: 'linear-gradient(135deg, #6366F1, #06B6D4)' }}>
-          <svg width="22" height="22" fill="none" stroke="white" strokeWidth="2.5" viewBox="0 0 24 24">
-            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+            <rect x="3" y="9" width="13" height="9" rx="1.6" fill="white"/>
+            <path d="M16 11.2 L21 9 L21 18 L16 15.8 Z" fill="white"/>
+            <circle cx="9.5" cy="13.5" r="1.5" fill="#6366F1"/>
+            <circle cx="14" cy="10.5" r="0.9" fill="#EF4444"/>
           </svg>
         </div>
         <h1 className="text-xl font-bold text-gradient-sync">SyncPilot</h1>

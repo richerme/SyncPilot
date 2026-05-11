@@ -170,8 +170,11 @@ export default function VideoPlayerPage({ slug, initialData }: {
         <Link href="/dashboard" className="flex items-center gap-2">
           <div className="w-6 h-6 rounded-md flex items-center justify-center"
             style={{ background: 'linear-gradient(135deg, #6366F1, #06B6D4)' }}>
-            <svg width="12" height="12" fill="none" stroke="white" strokeWidth="2.5" viewBox="0 0 24 24">
-              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <rect x="3" y="9" width="13" height="9" rx="1.6" fill="white"/>
+              <path d="M16 11.2 L21 9 L21 18 L16 15.8 Z" fill="white"/>
+              <circle cx="9.5" cy="13.5" r="1.5" fill="#6366F1"/>
+              <circle cx="14" cy="10.5" r="0.9" fill="#EF4444"/>
             </svg>
           </div>
           <span className="text-sm font-bold text-gradient-sync">SyncPilot</span>

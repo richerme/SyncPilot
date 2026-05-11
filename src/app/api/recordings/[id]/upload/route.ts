@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
-import { writeFile, mkdir, appendFile, rename, readdir, unlink, readFile } from 'node:fs/promises'
+import { mkdir, appendFile, stat, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
 export const config = { api: { bodyParser: false } }
+export const maxDuration = 300
 
 type RouteParams = { params: Promise<{ id: string }> }
 
@@ -23,7 +24,6 @@ export async function POST(request: Request, { params }: RouteParams) {
   const chunk = formData.get('chunk') as File | null
   const chunkIndex = Number(formData.get('chunkIndex'))
   const totalChunks = Number(formData.get('totalChunks'))
-  const mimeType = (formData.get('mimeType') as string) || 'video/webm'
 
   if (!chunk) return NextResponse.json({ error: 'Sin chunk' }, { status: 400 })
 
@@ -31,40 +31,22 @@ export async function POST(request: Request, { params }: RouteParams) {
   const recordingDir = path.join(uploadDir, session.user.id, recordingId)
   await mkdir(recordingDir, { recursive: true })
 
-  const chunkPath = path.join(recordingDir, `chunk-${chunkIndex}`)
+  const fileName = 'recording.webm'
+  const finalPath = path.join(recordingDir, fileName)
+  const storagePath = path.join(session.user.id, recordingId, fileName).replace(/\\/g, '/')
+
+  // En el primer chunk, eliminar archivo previo si existe (re-upload)
+  if (chunkIndex === 0) {
+    await unlink(finalPath).catch(() => {})
+  }
+
+  // Append directo al archivo final (los chunks llegan en orden desde el cliente)
   const buffer = Buffer.from(await chunk.arrayBuffer())
-  await writeFile(chunkPath, buffer)
+  await appendFile(finalPath, buffer)
 
-  // Si es el último chunk, ensamblar el archivo final
+  // Último chunk: marcar como listo
   if (chunkIndex === totalChunks - 1) {
-    const fileName = 'recording.webm'
-    const finalPath = path.join(recordingDir, fileName)
-    const storagePath = path.join(session.user.id, recordingId, fileName)
-
-    // Concatenar todos los chunks en orden
-    const finalFile = await import('node:fs').then(m => m.createWriteStream(finalPath))
-
-    for (let i = 0; i < totalChunks; i++) {
-      const cp = path.join(recordingDir, `chunk-${i}`)
-      const data = await readFile(cp)
-      await new Promise<void>((resolve, reject) => {
-        finalFile.write(data, err => err ? reject(err) : resolve())
-      })
-    }
-    await new Promise<void>(resolve => finalFile.end(resolve))
-
-    // Eliminar chunks temporales
-    for (let i = 0; i < totalChunks; i++) {
-      await unlink(path.join(recordingDir, `chunk-${i}`)).catch(() => {})
-    }
-
-    // Obtener tamaño del archivo
-    const { size } = await import('node:fs').then(m =>
-      new Promise<{ size: number }>((resolve, reject) =>
-        m.stat(finalPath, (err, s) => err ? reject(err) : resolve(s))
-      )
-    )
-
+    const { size } = await stat(finalPath)
     await prisma.recording.update({
       where: { id: recordingId },
       data: {
