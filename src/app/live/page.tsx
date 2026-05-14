@@ -38,17 +38,26 @@ export default function LivePage() {
   // Devices (audioinput) para selectores de modo
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
 
+  const refreshDevices = async () => {
+    try {
+      const d = await navigator.mediaDevices.enumerateDevices()
+      const inputs = d.filter(x => x.kind === 'audioinput')
+      setDevices(inputs)
+    } catch { /* ignore */ }
+  }
+
   useEffect(() => {
-    navigator.mediaDevices?.enumerateDevices?.().then(d => {
-      setDevices(d.filter(x => x.kind === 'audioinput' && x.label))
-    }).catch(() => {})
+    refreshDevices()
+    navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices)
+    return () => navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices)
   }, [])
 
   const handleGrantPermissions = async () => {
     try {
-      await navigator.mediaDevices.getUserMedia({ audio: true })
-      const d = await navigator.mediaDevices.enumerateDevices()
-      setDevices(d.filter(x => x.kind === 'audioinput'))
+      // Sólo necesario una vez: pide permiso para que enumerateDevices muestre labels.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream.getTracks().forEach(t => t.stop())
+      await refreshDevices()
     } catch { /* ignore */ }
   }
 
@@ -342,6 +351,13 @@ export default function LivePage() {
                   : { color: 'var(--color-text-muted)' }}>
                 🎙️ Solo Micrófono
               </button>
+              <button onClick={() => session.setAudioMode('tab')}
+                className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
+                style={session.audioMode === 'tab'
+                  ? { background: 'var(--color-bg-card)', color: 'white', boxShadow: '0 1px 4px rgb(0 0 0/0.3)' }
+                  : { color: 'var(--color-text-muted)' }}>
+                🖥️ Solo Pestaña
+              </button>
               <button onClick={() => session.setAudioMode('both')}
                 className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
                 style={session.audioMode === 'both'
@@ -407,10 +423,19 @@ export default function LivePage() {
                 style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
                 <p className="font-semibold text-white">🎧 Reunión Completa — Pestaña + Micrófono</p>
                 <p style={{ color: 'var(--color-text-secondary)' }}>
-                  Al iniciar, elige <strong>Pestaña</strong> del navegador (Teams Web / Zoom Web / Meet) o <strong>Toda la pantalla</strong> y marca ✓ <strong>Compartir audio</strong>. Tu voz aparece en azul, los demás en blanco.
+                  Al iniciar, en el diálogo del navegador elige <strong>Pestaña</strong> (Teams Web / Zoom Web / Meet) o <strong>Toda la pantalla</strong> y marca ✓ <strong>Compartir audio</strong>. El audio de la pestaña/sistema y tu micrófono se mezclan y se transcriben juntos.
                 </p>
                 <p style={{ color: 'var(--color-text-muted)' }}>
-                  Si usas <strong>Teams Desktop</strong> o <strong>Zoom Desktop</strong> con audífonos Bluetooth en modo manos libres, usa el modo <strong>Avanzado (Cable Virtual)</strong>.
+                  ⚠️ Para <strong>Teams Desktop / Zoom Desktop</strong> con audífonos Bluetooth en modo manos libres (HFP), Chrome NO captura el audio del sistema. Usa el modo <strong>Avanzado (Cable Virtual)</strong>.
+                </p>
+              </div>
+            )}
+            {session.audioMode === 'tab' && (
+              <div className="w-full p-3 rounded-xl border text-xs space-y-1"
+                style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
+                <p className="font-semibold text-white">🖥️ Solo Pestaña</p>
+                <p style={{ color: 'var(--color-text-secondary)' }}>
+                  Captura sólo el audio compartido (pestaña / toda la pantalla). Útil cuando NO quieres que tu micrófono se mezcle. Tu voz seguirá apareciendo en azul vía reconocimiento del navegador.
                 </p>
               </div>
             )}
@@ -419,7 +444,10 @@ export default function LivePage() {
                 style={{ borderColor: 'rgba(16,185,129,0.3)', background: 'rgba(16,185,129,0.05)' }}>
                 <p className="font-semibold text-white">🎛️ Avanzado (Cable Virtual)</p>
                 <p style={{ color: 'var(--color-text-secondary)' }}>
-                  Funciona con <strong>Teams Desktop / Zoom Desktop</strong>. Instala <strong>VB-CABLE</strong> (Windows) o activa <strong>Stereo Mix</strong>, configura tu app de reunión para que el audio salga al cable, y selecciónalo arriba en &quot;Audio del sistema&quot;.
+                  Para <strong>Teams Desktop / Zoom Desktop</strong>: instala <strong>VB-CABLE</strong> (Windows) o activa <strong>Stereo Mix</strong>, configura tu app de reunión para enviar el audio al cable, y selecciónalo en &quot;Audio del sistema&quot;.
+                </p>
+                <p style={{ color: 'var(--color-text-muted)' }}>
+                  ⚠️ NO selecciones tu auricular Bluetooth ni un micrófono regular como &quot;Audio del sistema&quot; — sólo capturará tu voz. Necesita ser un dispositivo de loopback.
                 </p>
               </div>
             )}

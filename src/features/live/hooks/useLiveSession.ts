@@ -16,7 +16,7 @@ export interface AiSuggestion {
 }
 
 export type LiveStatus = 'idle' | 'starting' | 'active' | 'ending' | 'done' | 'error'
-export type AudioMode = 'mic' | 'both' | 'dual'
+export type AudioMode = 'mic' | 'tab' | 'both' | 'dual'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SpeechRecognitionCtor = new () => any
@@ -86,7 +86,7 @@ export function useLiveSession() {
       const m = localStorage.getItem(STORAGE_AUDIO_MODE) as AudioMode | null
       const u = localStorage.getItem(STORAGE_USER_MIC)
       const s = localStorage.getItem(STORAGE_SYSTEM_MIC)
-      if (m === 'mic' || m === 'both' || m === 'dual') { setAudioModeState(m); audioModeRef.current = m }
+      if (m === 'mic' || m === 'tab' || m === 'both' || m === 'dual') { setAudioModeState(m); audioModeRef.current = m }
       if (u) { setUserMicIdState(u);   userMicIdRef.current = u }
       if (s) { setSystemMicIdState(s); systemMicIdRef.current = s }
     } catch { /* ignore */ }
@@ -304,30 +304,26 @@ export function useLiveSession() {
   }
 
   // ─────────────────────────────────────────────────────────
-  // MODO: "Reunión Completa" → Pestaña + Mic (getDisplayMedia)
+  // MODO: "Solo Pestaña" → sólo audio compartido por getDisplayMedia
   // ─────────────────────────────────────────────────────────
-  async function launchCombinedCapture() {
-    addLog('Combined: solicitando getDisplayMedia...')
+  async function launchTabCapture() {
+    addLog('Tab: solicitando getDisplayMedia...')
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
       video: { width: 1, height: 1, frameRate: 1 },
       audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 16000 },
-    })
+    } as DisplayMediaStreamOptions)
 
     const audioTracks = displayStream.getAudioTracks()
-    addLog(`Combined: audioTracks=${audioTracks.length}`)
+    addLog(`Tab: audioTracks=${audioTracks.length}, videoTracks=${displayStream.getVideoTracks().length}`)
 
     if (audioTracks.length === 0) {
       displayStream.getTracks().forEach(t => t.stop())
-      throw new Error('No se encontró audio compartido. Selecciona "Toda la pantalla" o "Pestaña" y marca ✓ "Compartir audio".')
+      throw new Error('No se encontró audio compartido. Selecciona "Pestaña" o "Toda la pantalla" y marca ✓ "Compartir audio".')
     }
 
     setAudioTracksOk(true)
     displayStreamRef.current = displayStream
 
-    // Stream para Whisper: SOLO el audio compartido (pestaña/sistema)
-    const meetingStream = new MediaStream(displayStream.getAudioTracks())
-
-    // Si usuario detiene compartir manualmente
     displayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
       if (shouldRestartRef.current) {
         setError('Compartir pantalla detenido.')
@@ -337,7 +333,91 @@ export function useLiveSession() {
     })
 
     setIsListening(true)
-    startChunkLoop(meetingStream)
+    startChunkLoop(new MediaStream(displayStream.getAudioTracks()))
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // MODO: "Reunión Completa" → Pestaña + Mic (mezcla via WebAudio)
+  // Idéntico al proyecto inicial: pide getDisplayMedia, después pide
+  // el mic con el deviceId seleccionado, y MEZCLA ambos en un
+  // MediaStreamDestination que se manda a Whisper como un solo stream.
+  // ─────────────────────────────────────────────────────────
+  async function launchCombinedCapture() {
+    addLog('Combined: solicitando getDisplayMedia (con VIDEO)...')
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: 1, height: 1, frameRate: 1 },
+      audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 16000 },
+    } as DisplayMediaStreamOptions)
+
+    const audioTracks = displayStream.getAudioTracks()
+    addLog(`Combined: stream obtenido. audioTracks=${audioTracks.length}, videoTracks=${displayStream.getVideoTracks().length}`)
+
+    if (audioTracks.length === 0) {
+      displayStream.getTracks().forEach(t => t.stop())
+      throw new Error('No se encontró audio compartido. Selecciona "Pestaña" o "Toda la pantalla" y marca ✓ "Compartir audio".')
+    }
+    displayStreamRef.current = displayStream
+
+    // Pedir el mic con el deviceId del usuario (o el predeterminado del sistema)
+    const micConstraints: MediaTrackConstraints = {
+      echoCancellation: true,
+      noiseSuppression: true,
+    }
+    if (userMicIdRef.current && userMicIdRef.current !== 'default') {
+      micConstraints.deviceId = { exact: userMicIdRef.current }
+    }
+
+    let micStream: MediaStream | null = null
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints, video: false })
+      addLog(`Combined: mic obtenido "${micStream.getAudioTracks()[0]?.label}"`)
+    } catch (err) {
+      addLog(`Combined: mic preferido falló (${err instanceof Error ? err.message : err}). Fallback a default.`)
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true },
+          video: false,
+        })
+        addLog(`Combined: mic default obtenido "${micStream.getAudioTracks()[0]?.label}"`)
+      } catch (err2) {
+        addLog(`Combined: WARN sin mic — sólo audio de pestaña/sistema (${err2 instanceof Error ? err2.message : err2})`)
+      }
+    }
+    if (micStream) micStreamRef.current = micStream
+
+    // Mezcla tab + mic via Web Audio API → un solo MediaStream para MediaRecorder
+    const audioCtx = audioContextRef.current ?? new AudioContext({ sampleRate: 16000 })
+    if (audioCtx.state === 'suspended') {
+      try { await audioCtx.resume() } catch { /* ignore */ }
+    }
+    audioContextRef.current = audioCtx
+
+    const destination = audioCtx.createMediaStreamDestination()
+    const tabSource = audioCtx.createMediaStreamSource(new MediaStream(displayStream.getAudioTracks()))
+    tabSource.connect(destination)
+    addLog('Combined: tab source conectado al mix')
+
+    if (micStream && micStream.getAudioTracks().length > 0) {
+      const micSource = audioCtx.createMediaStreamSource(micStream)
+      micSource.connect(destination)
+      addLog('Combined: mic source conectado al mix')
+    } else {
+      addLog('Combined: WARN sin mic en el mix')
+    }
+
+    const combinedStream = new MediaStream(destination.stream.getAudioTracks())
+
+    displayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
+      if (shouldRestartRef.current) {
+        setError('Compartir pantalla detenido.')
+        shouldRestartRef.current = false
+        setIsListening(false)
+      }
+    })
+
+    setAudioTracksOk(true)
+    setIsListening(true)
+    startChunkLoop(combinedStream)
   }
 
   // ─────────────────────────────────────────────────────────
@@ -361,7 +441,25 @@ export function useLiveSession() {
     const sysStream = await navigator.mediaDevices.getUserMedia({ audio: sysConstraints, video: false })
     sysStreamRef.current = sysStream
     const sysTrack = sysStream.getAudioTracks()[0]
+    const label = (sysTrack?.label ?? '').toLowerCase()
     addLog(`Dual: system mic "${sysTrack?.label}"`)
+
+    // Heurística: si el dispositivo seleccionado parece un mic común (headset/bluetooth/microphone)
+    // probablemente sólo captará la voz del usuario, NO el audio del sistema. Advertir.
+    const isLikelyVirtualCable =
+      label.includes('cable') || label.includes('vb-audio') ||
+      label.includes('stereo mix') || label.includes('mezcla estéreo') ||
+      label.includes('loopback') || label.includes('what u hear') || label.includes('voicemeeter')
+    const isLikelyRegularMic =
+      label.includes('headset') || label.includes('bluetooth') ||
+      label.includes('microphone') || label.includes('micrófono') ||
+      label.includes('mic ') || /\bmic\b/.test(label)
+
+    if (!isLikelyVirtualCable && isLikelyRegularMic) {
+      addLog(`Dual: WARN — "${sysTrack?.label}" parece un micrófono regular, no un loopback. Sólo capturará tu voz, no el audio de Teams/Zoom Desktop.`)
+      setError(`"${sysTrack?.label}" parece un micrófono. Para capturar el audio de la reunión necesitas Stereo Mix o un cable virtual como VB-Cable. Instálalo y configúralo como salida en Teams/Zoom.`)
+    }
+
     setAudioTracksOk(true)
     setIsListening(true)
     startChunkLoop(sysStream)
@@ -414,6 +512,8 @@ export function useLiveSession() {
 
       if (mode === 'both') {
         await launchCombinedCapture()
+      } else if (mode === 'tab') {
+        await launchTabCapture()
       } else if (mode === 'dual') {
         await launchDualCapture()
       } else {
