@@ -76,6 +76,22 @@ export async function PATCH(request: Request, { params }: RouteParams) {
   return NextResponse.json({ success: true })
 }
 
+export async function DELETE(_request: Request, { params }: RouteParams) {
+  const session = await auth()
+  if (!session?.user?.id) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
+
+  const { id: meetingId } = await params
+
+  const meeting = await prisma.meeting.findFirst({
+    where: { id: meetingId, userId: session.user.id },
+    select: { id: true },
+  })
+  if (!meeting) return NextResponse.json({ error: 'No encontrado' }, { status: 404 })
+
+  await prisma.meeting.delete({ where: { id: meetingId } })
+  return NextResponse.json({ success: true })
+}
+
 export async function GET(_request: Request, { params }: RouteParams) {
   const session = await auth()
   if (!session?.user?.id) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })

@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import ConfirmDialog from '@/components/ui/ConfirmDialog'
 
 interface Document {
   id: string; name: string; fileType: string; isActive: boolean; createdAt: string; fileSizeBytes: number | null
@@ -16,6 +17,8 @@ export default function DocumentsPage() {
   const [docs, setDocs] = useState<Document[]>([])
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<Document | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const loadDocs = useCallback(async () => {
     const res = await fetch('/api/documents')
@@ -41,9 +44,23 @@ export default function DocumentsPage() {
     e.target.value = ''
   }
 
-  async function handleDelete(id: string) {
-    const res = await fetch(`/api/documents/${id}`, { method: 'DELETE' })
-    if (res.ok) setDocs(prev => prev.filter(d => d.id !== id))
+  async function confirmDelete() {
+    if (!pendingDelete) return
+    setDeleting(true)
+    try {
+      const res = await fetch(`/api/documents/${pendingDelete.id}`, { method: 'DELETE' })
+      if (res.ok) {
+        setDocs(prev => prev.filter(d => d.id !== pendingDelete.id))
+        setPendingDelete(null)
+      } else {
+        const d = await res.json().catch(() => ({}))
+        setError(d.error ?? 'Error al eliminar')
+      }
+    } catch {
+      setError('Error de red al eliminar')
+    } finally {
+      setDeleting(false)
+    }
   }
 
   async function handleToggle(id: string, current: boolean) {
@@ -118,7 +135,9 @@ export default function DocumentsPage() {
                   }}>
                   {doc.isActive ? 'Activo' : 'Inactivo'}
                 </button>
-                <button onClick={() => handleDelete(doc.id)}
+                <button onClick={() => setPendingDelete(doc)}
+                  aria-label="Eliminar documento"
+                  title="Eliminar documento"
                   className="p-1.5 rounded-lg transition-all hover:bg-red-500/10"
                   style={{ color: 'var(--color-text-muted)' }}>
                   <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -131,6 +150,18 @@ export default function DocumentsPage() {
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title="¿Eliminar documento?"
+        description={pendingDelete ? `Se eliminará "${pendingDelete.name}". La IA dejará de usarlo como referencia en tus reuniones.` : ''}
+        confirmLabel="Eliminar"
+        cancelLabel="Cancelar"
+        variant="danger"
+        busy={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => !deleting && setPendingDelete(null)}
+      />
     </div>
   )
 }

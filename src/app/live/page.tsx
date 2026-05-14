@@ -1,6 +1,7 @@
 'use client'
 
 import { useLiveSession } from '@/features/live/hooks/useLiveSession'
+import Link from 'next/link'
 import { useEffect, useRef, useState } from 'react'
 import RecordingStatusBar from '@/components/layout/RecordingStatusBar'
 
@@ -33,6 +34,23 @@ export default function LivePage() {
   const [liveTranslatorLang, setLiveTranslatorLang]       = useState('es')
   const [translations, setTranslations] = useState<Record<string, string>>({})
   const translatingRef = useRef<Set<string>>(new Set())
+
+  // Devices (audioinput) para selectores de modo
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
+
+  useEffect(() => {
+    navigator.mediaDevices?.enumerateDevices?.().then(d => {
+      setDevices(d.filter(x => x.kind === 'audioinput' && x.label))
+    }).catch(() => {})
+  }, [])
+
+  const handleGrantPermissions = async () => {
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true })
+      const d = await navigator.mediaDevices.enumerateDevices()
+      setDevices(d.filter(x => x.kind === 'audioinput'))
+    } catch { /* ignore */ }
+  }
 
   const transcriptRef     = useRef<HTMLDivElement>(null)
   const suggestRef        = useRef<HTMLDivElement>(null)
@@ -156,10 +174,10 @@ export default function LivePage() {
               </span>
             </>
           )}
-          <a href="/dashboard" className="text-xs px-3 py-1.5 rounded-lg"
+          <Link href="/dashboard" className="text-xs px-3 py-1.5 rounded-lg"
             style={{ background: 'var(--color-surface)', color: 'var(--color-text-secondary)' }}>
             ← Dashboard
-          </a>
+          </Link>
         </div>
       </header>
 
@@ -312,21 +330,107 @@ export default function LivePage() {
         style={{ borderColor: 'var(--color-surface-border)', background: 'var(--color-bg-card)' }}>
 
         {isIdle && (
-          <div className="flex flex-col items-center gap-3 w-full max-w-xl">
-            {/* Instrucciones */}
-            <div className="w-full p-4 rounded-xl border text-xs space-y-2"
-              style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
-              <p className="font-semibold text-white text-sm">🎧 Reunión Completa — Cómo usarlo</p>
-              <p style={{ color: 'var(--color-text-secondary)' }}>
-                <strong style={{ color: '#10B981' }}>Paso 1:</strong> Abre tu reunión (Teams, Zoom, Meet) en <strong>una pestaña del navegador</strong> (versión web).
-              </p>
-              <p style={{ color: 'var(--color-text-secondary)' }}>
-                <strong style={{ color: '#10B981' }}>Paso 2:</strong> Al hacer clic en &quot;Iniciar&quot;, selecciona esa <strong>pestaña</strong> en el diálogo del navegador y activa <strong>✓ Compartir audio de la pestaña</strong>.
-              </p>
-              <p style={{ color: 'var(--color-text-secondary)' }}>
-                <strong style={{ color: '#818CF8' }}>Tu voz</strong> aparecerá en <span style={{ color: '#818CF8' }}>azul</span> (instantáneo via micrófono) · <strong>Otros</strong> aparecerán en <span style={{ color: '#e2e8f0' }}>blanco</span> (audio de pestaña, ~2s de delay).
-              </p>
+          <div className="flex flex-col items-center gap-3 w-full max-w-2xl">
+
+            {/* Selector de modo */}
+            <div className="flex flex-wrap items-center justify-center gap-1 p-1 rounded-xl"
+              style={{ background: 'var(--color-surface)' }}>
+              <button onClick={() => session.setAudioMode('mic')}
+                className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
+                style={session.audioMode === 'mic'
+                  ? { background: 'var(--color-bg-card)', color: 'white', boxShadow: '0 1px 4px rgb(0 0 0/0.3)' }
+                  : { color: 'var(--color-text-muted)' }}>
+                🎙️ Solo Micrófono
+              </button>
+              <button onClick={() => session.setAudioMode('both')}
+                className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
+                style={session.audioMode === 'both'
+                  ? { background: 'var(--color-bg-card)', color: 'white', border: '1px solid #6366F1', boxShadow: '0 0 8px rgba(99,102,241,0.3)' }
+                  : { color: 'var(--color-text-muted)' }}>
+                🎧 Reunión Completa (Pestaña + Micrófono)
+              </button>
+              <button onClick={() => session.setAudioMode('dual')}
+                className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
+                style={session.audioMode === 'dual'
+                  ? { background: 'var(--color-bg-card)', color: 'white', border: '1px solid #10B981', boxShadow: '0 0 8px rgba(16,185,129,0.3)' }
+                  : { color: 'var(--color-text-muted)' }}>
+                🎛️ Avanzado (Cable Virtual)
+              </button>
             </div>
+
+            {/* Dispositivos de captura: configuración común a todos los modos */}
+            <div className="w-full p-3 rounded-xl border space-y-2"
+              style={{ borderColor: 'var(--color-surface-border)', background: 'var(--color-surface)' }}>
+              <p className="text-xs font-semibold text-white">Dispositivos de captura</p>
+              <div className="space-y-2">
+                <div>
+                  <label className="block text-xs mb-1" style={{ color: 'var(--color-text-secondary)' }}>
+                    🎤 Tu voz (Micrófono principal)
+                  </label>
+                  <select value={session.userMicId} onChange={e => session.setUserMicId(e.target.value)}
+                    className="w-full text-xs px-3 py-2 rounded-lg bg-transparent border text-white"
+                    style={{ borderColor: 'var(--color-surface-border)' }}>
+                    <option value="default">Automático (Predeterminado del Sistema)</option>
+                    {devices.map(d => (
+                      <option key={d.deviceId} value={d.deviceId}>{d.label || `Micrófono ${d.deviceId.slice(0,5)}…`}</option>
+                    ))}
+                  </select>
+                </div>
+                {session.audioMode === 'dual' && (
+                  <div>
+                    <label className="block text-xs mb-1" style={{ color: 'var(--color-text-secondary)' }}>
+                      🔊 Audio del sistema (Stereo Mix / VB-Cable)
+                    </label>
+                    <select value={session.systemMicId} onChange={e => session.setSystemMicId(e.target.value)}
+                      className="w-full text-xs px-3 py-2 rounded-lg bg-transparent border text-white"
+                      style={{ borderColor: 'var(--color-surface-border)' }}>
+                      <option value="none">No capturar</option>
+                      <option value="default">Automático (Predeterminado del Sistema)</option>
+                      {devices.map(d => (
+                        <option key={d.deviceId} value={d.deviceId}>{d.label || `Dispositivo ${d.deviceId.slice(0,5)}…`}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {devices.length === 0 && (
+                  <button onClick={handleGrantPermissions}
+                    className="text-xs underline" style={{ color: '#818CF8' }}>
+                    Otorgar permisos para detectar dispositivos
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Tips por modo */}
+            {session.audioMode === 'both' && (
+              <div className="w-full p-3 rounded-xl border text-xs space-y-1"
+                style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
+                <p className="font-semibold text-white">🎧 Reunión Completa — Pestaña + Micrófono</p>
+                <p style={{ color: 'var(--color-text-secondary)' }}>
+                  Al iniciar, elige <strong>Pestaña</strong> del navegador (Teams Web / Zoom Web / Meet) o <strong>Toda la pantalla</strong> y marca ✓ <strong>Compartir audio</strong>. Tu voz aparece en azul, los demás en blanco.
+                </p>
+                <p style={{ color: 'var(--color-text-muted)' }}>
+                  Si usas <strong>Teams Desktop</strong> o <strong>Zoom Desktop</strong> con audífonos Bluetooth en modo manos libres, usa el modo <strong>Avanzado (Cable Virtual)</strong>.
+                </p>
+              </div>
+            )}
+            {session.audioMode === 'dual' && (
+              <div className="w-full p-3 rounded-xl border text-xs space-y-1"
+                style={{ borderColor: 'rgba(16,185,129,0.3)', background: 'rgba(16,185,129,0.05)' }}>
+                <p className="font-semibold text-white">🎛️ Avanzado (Cable Virtual)</p>
+                <p style={{ color: 'var(--color-text-secondary)' }}>
+                  Funciona con <strong>Teams Desktop / Zoom Desktop</strong>. Instala <strong>VB-CABLE</strong> (Windows) o activa <strong>Stereo Mix</strong>, configura tu app de reunión para que el audio salga al cable, y selecciónalo arriba en &quot;Audio del sistema&quot;.
+                </p>
+              </div>
+            )}
+            {session.audioMode === 'mic' && (
+              <div className="w-full p-3 rounded-xl border text-xs"
+                style={{ borderColor: 'var(--color-surface-border)', background: 'var(--color-surface)' }}>
+                <p style={{ color: 'var(--color-text-secondary)' }}>
+                  🎙️ Solo se transcribirá tu voz desde el micrófono. Útil para dictado o monólogos.
+                </p>
+              </div>
+            )}
 
             <button onClick={session.startSession} className="btn-primary flex items-center gap-2 px-8 py-3">
               <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
@@ -371,7 +475,7 @@ export default function LivePage() {
               style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
               Nueva sesión
             </button>
-            <a href="/meetings" className="btn-primary text-sm px-5 py-2">Ver en Reuniones</a>
+            <Link href="/meetings" className="btn-primary text-sm px-5 py-2">Ver en Reuniones</Link>
           </div>
         )}
       </footer>

@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import type { SupportedLanguage } from '../types'
 import { LANGUAGE_LABELS } from '../types'
 
@@ -113,12 +114,12 @@ export default function LiveTranslatorTab() {
           <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
             Traduce al <strong className="text-white">{LANGUAGE_LABELS[lang]}</strong> — activo en tu próxima sesión en vivo.
           </p>
-          <a href="/live" className="btn-primary inline-flex items-center gap-2 mt-3 text-sm px-5 py-2">
+          <Link href="/live" className="btn-primary inline-flex items-center gap-2 mt-3 text-sm px-5 py-2">
             <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
               <polygon points="5 3 19 12 5 21 5 3" />
             </svg>
             Ir a IA en Vivo
-          </a>
+          </Link>
         </div>
       )}
     </div>

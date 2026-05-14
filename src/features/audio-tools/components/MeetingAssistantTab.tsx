@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import type { MeetingAnalysis } from '../types'
 import { analyzeMeeting, getSavedMeetingAnalysis } from '../services/audioToolsApi'
 
@@ -67,9 +68,9 @@ export default function MeetingAssistantTab({ userId }: { userId: string }) {
         ) : meetings.length === 0 ? (
           <div className="p-4 rounded-xl text-center" style={{ background: 'var(--color-surface)' }}>
             <p className="text-sm text-white mb-2">Sin reuniones con transcripción</p>
-            <a href="/live" className="text-xs" style={{ color: '#818CF8' }}>
+            <Link href="/live" className="text-xs" style={{ color: '#818CF8' }}>
               Inicia una sesión en IA en Vivo →
-            </a>
+            </Link>
           </div>
         ) : (
           <div className="space-y-1.5 max-h-48 overflow-y-auto">
