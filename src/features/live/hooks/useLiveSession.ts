@@ -16,7 +16,6 @@ export interface AiSuggestion {
 }
 
 export type LiveStatus = 'idle' | 'starting' | 'active' | 'ending' | 'done' | 'error'
-export type AudioMode = 'mic' | 'tab' | 'both' | 'dual'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SpeechRecognitionCtor = new () => any
@@ -28,13 +27,13 @@ declare global {
   }
 }
 
-const SUGGEST_DEBOUNCE_MS = 3000
-const DURATION_TICK_MS    = 1000
-const CHUNK_MS            = 2000
-
-const STORAGE_AUDIO_MODE   = 'syncpilot_audio_mode'
-const STORAGE_USER_MIC     = 'syncpilot_user_mic'
-const STORAGE_SYSTEM_MIC   = 'syncpilot_system_mic'
+const SUGGEST_DEBOUNCE_MS  = 3000
+const DURATION_TICK_MS     = 1000
+const CHUNK_MS             = 2000
+// La transcripción de la reunión se acumula como "preview" y se vuelca al
+// historial cuando hay una pausa (chunk en silencio) o cuando el texto llega
+// a este largo, para mantener fragmentos legibles.
+const MEETING_FLUSH_CHARS  = 220
 
 export function useLiveSession() {
   const [status,        setStatus]        = useState<LiveStatus>('idle')
@@ -45,12 +44,10 @@ export function useLiveSession() {
   const [duration,      setDuration]      = useState(0)
   const [error,         setError]         = useState<string | null>(null)
   const [isListening,   setIsListening]   = useState(false)
-  const [interimText,   setInterimText]   = useState('')
+  const [interimText,   setInterimText]   = useState('')      // voz del usuario (azul)
+  const [meetingInterim, setMeetingInterim] = useState('')    // audio de reunión (blanco)
   const [debugLogs,     setDebugLogs]     = useState<string[]>([])
   const [audioTracksOk, setAudioTracksOk] = useState(false)
-  const [audioMode,     setAudioModeState] = useState<AudioMode>('both')
-  const [userMicId,     setUserMicIdState]   = useState<string>('default')
-  const [systemMicId,   setSystemMicIdState] = useState<string>('default')
 
   const meetingIdRef       = useRef<string | null>(null)
   const timerRef           = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -61,17 +58,12 @@ export function useLiveSession() {
   const shouldRestartRef   = useRef<boolean>(false)
   const chunkActiveRef     = useRef<boolean>(false)
   const documentContextRef = useRef<string>('')
-  const audioModeRef       = useRef<AudioMode>('both')
-  const userMicIdRef       = useRef<string>('default')
-  const systemMicIdRef     = useRef<string>('default')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef     = useRef<any>(null)
   const meetingStreamRef   = useRef<MediaStream | null>(null)   // stream que se manda al recorder
-  const displayStreamRef   = useRef<MediaStream | null>(null)   // pestaña (getDisplayMedia)
-  const micStreamRef       = useRef<MediaStream | null>(null)   // mic del usuario
-  const sysStreamRef       = useRef<MediaStream | null>(null)   // mic de sistema (VB-Cable / Stereo Mix)
+  const displayStreamRef   = useRef<MediaStream | null>(null)   // pestaña/pantalla (getDisplayMedia)
   const recorderRef        = useRef<MediaRecorder | null>(null)
-  const audioContextRef    = useRef<AudioContext | null>(null)
+  const meetingBufferRef   = useRef<string>('')                 // texto acumulado del turno actual
 
   function addLog(msg: string) {
     const entry = `[${new Date().toLocaleTimeString()}] ${msg}`
@@ -80,17 +72,6 @@ export function useLiveSession() {
   }
 
   useEffect(() => { transcriptRef.current = transcript }, [transcript])
-
-  useEffect(() => {
-    try {
-      const m = localStorage.getItem(STORAGE_AUDIO_MODE) as AudioMode | null
-      const u = localStorage.getItem(STORAGE_USER_MIC)
-      const s = localStorage.getItem(STORAGE_SYSTEM_MIC)
-      if (m === 'mic' || m === 'tab' || m === 'both' || m === 'dual') { setAudioModeState(m); audioModeRef.current = m }
-      if (u) { setUserMicIdState(u);   userMicIdRef.current = u }
-      if (s) { setSystemMicIdState(s); systemMicIdRef.current = s }
-    } catch { /* ignore */ }
-  }, [])
 
   useEffect(() => {
     return () => {
@@ -104,37 +85,13 @@ export function useLiveSession() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const setAudioMode = useCallback((m: AudioMode) => {
-    setAudioModeState(m)
-    audioModeRef.current = m
-    try { localStorage.setItem(STORAGE_AUDIO_MODE, m) } catch { /* ignore */ }
-  }, [])
-
-  const setUserMicId = useCallback((id: string) => {
-    setUserMicIdState(id)
-    userMicIdRef.current = id
-    try { localStorage.setItem(STORAGE_USER_MIC, id) } catch { /* ignore */ }
-  }, [])
-
-  const setSystemMicId = useCallback((id: string) => {
-    setSystemMicIdState(id)
-    systemMicIdRef.current = id
-    try { localStorage.setItem(STORAGE_SYSTEM_MIC, id) } catch { /* ignore */ }
-  }, [])
-
   function stopAllStreams() {
     try { recorderRef.current?.state !== 'inactive' && recorderRef.current?.stop() } catch { /**/ }
     meetingStreamRef.current?.getTracks().forEach(t => t.stop())
     displayStreamRef.current?.getTracks().forEach(t => t.stop())
-    micStreamRef.current?.getTracks().forEach(t => t.stop())
-    sysStreamRef.current?.getTracks().forEach(t => t.stop())
     meetingStreamRef.current = null
     displayStreamRef.current = null
-    micStreamRef.current     = null
-    sysStreamRef.current     = null
     recorderRef.current      = null
-    if (audioContextRef.current?.state !== 'closed') audioContextRef.current?.close().catch(() => {})
-    audioContextRef.current = null
   }
 
   const blobToBase64 = (blob: Blob): Promise<string> =>
@@ -251,7 +208,18 @@ export function useLiveSession() {
     try { rec.start() } catch { /**/ }
   }
 
-  // Procesar chunks recurrentes desde un MediaStream → Whisper → speaker='meeting'
+  // Volcar el texto acumulado del turno de la reunión al historial.
+  function flushMeetingBuffer() {
+    const t = meetingBufferRef.current.trim()
+    meetingBufferRef.current = ''
+    setMeetingInterim('')
+    if (t && t.length > 1) {
+      addSegment(t, 'meeting')
+      saveSegment(t, 'meeting')
+    }
+  }
+
+  // Procesar chunks recurrentes desde un MediaStream → Gemini → preview + historial.
   function startChunkLoop(stream: MediaStream) {
     meetingStreamRef.current = stream
     chunkActiveRef.current   = true
@@ -285,9 +253,14 @@ export function useLiveSession() {
             const data = await res.json()
             const text: string = (data.text ?? '').trim()
             if (text && text.length > 1) {
-              addLog(`Reunión: "${text.slice(0, 80)}"`)
-              addSegment(text, 'meeting')
-              saveSegment(text, 'meeting')
+              // Hay voz → crece el preview en tiempo real
+              meetingBufferRef.current = `${meetingBufferRef.current} ${text}`.trim()
+              setMeetingInterim(meetingBufferRef.current)
+              addLog(`Reunión (preview): "${text.slice(0, 80)}"`)
+              if (meetingBufferRef.current.length >= MEETING_FLUSH_CHARS) flushMeetingBuffer()
+            } else if (meetingBufferRef.current.trim()) {
+              // Chunk en silencio tras hablar → fin de turno: volcar al historial
+              flushMeetingBuffer()
             }
           } else addLog(`API ${res.status}`)
         } catch (err) {
@@ -304,24 +277,23 @@ export function useLiveSession() {
   }
 
   // ─────────────────────────────────────────────────────────
-  // MODO: "Solo Pestaña" → sólo audio compartido por getDisplayMedia
+  // Captura única: audio de la pestaña/pantalla compartida → Gemini (reunión).
+  // La voz del usuario la cubre SpeechRecognition, así no se duplica.
   // ─────────────────────────────────────────────────────────
-  async function launchTabCapture() {
-    addLog('Tab: solicitando getDisplayMedia...')
+  async function launchMeetingCapture() {
+    addLog('Reunión: solicitando getDisplayMedia...')
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
       video: { width: 1, height: 1, frameRate: 1 },
       audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 16000 },
     } as DisplayMediaStreamOptions)
 
     const audioTracks = displayStream.getAudioTracks()
-    addLog(`Tab: audioTracks=${audioTracks.length}, videoTracks=${displayStream.getVideoTracks().length}`)
+    addLog(`Reunión: audioTracks=${audioTracks.length}, videoTracks=${displayStream.getVideoTracks().length}`)
 
     if (audioTracks.length === 0) {
       displayStream.getTracks().forEach(t => t.stop())
       throw new Error('No se encontró audio compartido. Selecciona "Pestaña" o "Toda la pantalla" y marca ✓ "Compartir audio".')
     }
-
-    setAudioTracksOk(true)
     displayStreamRef.current = displayStream
 
     displayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
@@ -332,143 +304,10 @@ export function useLiveSession() {
       }
     })
 
+    setAudioTracksOk(true)
     setIsListening(true)
     startChunkLoop(new MediaStream(displayStream.getAudioTracks()))
   }
-
-  // ─────────────────────────────────────────────────────────
-  // MODO: "Reunión Completa" → Pestaña + Mic (mezcla via WebAudio)
-  // Idéntico al proyecto inicial: pide getDisplayMedia, después pide
-  // el mic con el deviceId seleccionado, y MEZCLA ambos en un
-  // MediaStreamDestination que se manda a Whisper como un solo stream.
-  // ─────────────────────────────────────────────────────────
-  async function launchCombinedCapture() {
-    addLog('Combined: solicitando getDisplayMedia (con VIDEO)...')
-    const displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { width: 1, height: 1, frameRate: 1 },
-      audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 16000 },
-    } as DisplayMediaStreamOptions)
-
-    const audioTracks = displayStream.getAudioTracks()
-    addLog(`Combined: stream obtenido. audioTracks=${audioTracks.length}, videoTracks=${displayStream.getVideoTracks().length}`)
-
-    if (audioTracks.length === 0) {
-      displayStream.getTracks().forEach(t => t.stop())
-      throw new Error('No se encontró audio compartido. Selecciona "Pestaña" o "Toda la pantalla" y marca ✓ "Compartir audio".')
-    }
-    displayStreamRef.current = displayStream
-
-    // Pedir el mic con el deviceId del usuario (o el predeterminado del sistema)
-    const micConstraints: MediaTrackConstraints = {
-      echoCancellation: true,
-      noiseSuppression: true,
-    }
-    if (userMicIdRef.current && userMicIdRef.current !== 'default') {
-      micConstraints.deviceId = { exact: userMicIdRef.current }
-    }
-
-    let micStream: MediaStream | null = null
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints, video: false })
-      addLog(`Combined: mic obtenido "${micStream.getAudioTracks()[0]?.label}"`)
-    } catch (err) {
-      addLog(`Combined: mic preferido falló (${err instanceof Error ? err.message : err}). Fallback a default.`)
-      try {
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true },
-          video: false,
-        })
-        addLog(`Combined: mic default obtenido "${micStream.getAudioTracks()[0]?.label}"`)
-      } catch (err2) {
-        addLog(`Combined: WARN sin mic — sólo audio de pestaña/sistema (${err2 instanceof Error ? err2.message : err2})`)
-      }
-    }
-    if (micStream) micStreamRef.current = micStream
-
-    // Mezcla tab + mic via Web Audio API → un solo MediaStream para MediaRecorder
-    const audioCtx = audioContextRef.current ?? new AudioContext({ sampleRate: 16000 })
-    if (audioCtx.state === 'suspended') {
-      try { await audioCtx.resume() } catch { /* ignore */ }
-    }
-    audioContextRef.current = audioCtx
-
-    const destination = audioCtx.createMediaStreamDestination()
-    const tabSource = audioCtx.createMediaStreamSource(new MediaStream(displayStream.getAudioTracks()))
-    tabSource.connect(destination)
-    addLog('Combined: tab source conectado al mix')
-
-    if (micStream && micStream.getAudioTracks().length > 0) {
-      const micSource = audioCtx.createMediaStreamSource(micStream)
-      micSource.connect(destination)
-      addLog('Combined: mic source conectado al mix')
-    } else {
-      addLog('Combined: WARN sin mic en el mix')
-    }
-
-    const combinedStream = new MediaStream(destination.stream.getAudioTracks())
-
-    displayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
-      if (shouldRestartRef.current) {
-        setError('Compartir pantalla detenido.')
-        shouldRestartRef.current = false
-        setIsListening(false)
-      }
-    })
-
-    setAudioTracksOk(true)
-    setIsListening(true)
-    startChunkLoop(combinedStream)
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // MODO: "Avanzado (Cable Virtual)" → dos getUserMedia
-  // userMic → SpeechRecognition (azul). systemMic → Whisper (blanco)
-  // ─────────────────────────────────────────────────────────
-  async function launchDualCapture() {
-    addLog('Dual: solicitando getUserMedia para system mic...')
-    if (!systemMicIdRef.current || systemMicIdRef.current === 'none') {
-      throw new Error('Selecciona un dispositivo en "Audio del sistema" (Stereo Mix o VB-Cable).')
-    }
-
-    const sysConstraints: MediaTrackConstraints = {
-      echoCancellation: false,
-      noiseSuppression: false,
-    }
-    if (systemMicIdRef.current !== 'default') {
-      sysConstraints.deviceId = { exact: systemMicIdRef.current }
-    }
-
-    const sysStream = await navigator.mediaDevices.getUserMedia({ audio: sysConstraints, video: false })
-    sysStreamRef.current = sysStream
-    const sysTrack = sysStream.getAudioTracks()[0]
-    const label = (sysTrack?.label ?? '').toLowerCase()
-    addLog(`Dual: system mic "${sysTrack?.label}"`)
-
-    // Heurística: si el dispositivo seleccionado parece un mic común (headset/bluetooth/microphone)
-    // probablemente sólo captará la voz del usuario, NO el audio del sistema. Advertir.
-    const isLikelyVirtualCable =
-      label.includes('cable') || label.includes('vb-audio') ||
-      label.includes('stereo mix') || label.includes('mezcla estéreo') ||
-      label.includes('loopback') || label.includes('what u hear') || label.includes('voicemeeter')
-    const isLikelyRegularMic =
-      label.includes('headset') || label.includes('bluetooth') ||
-      label.includes('microphone') || label.includes('micrófono') ||
-      label.includes('mic ') || /\bmic\b/.test(label)
-
-    if (!isLikelyVirtualCable && isLikelyRegularMic) {
-      addLog(`Dual: WARN — "${sysTrack?.label}" parece un micrófono regular, no un loopback. Sólo capturará tu voz, no el audio de Teams/Zoom Desktop.`)
-      setError(`"${sysTrack?.label}" parece un micrófono. Para capturar el audio de la reunión necesitas Stereo Mix o un cable virtual como VB-Cable. Instálalo y configúralo como salida en Teams/Zoom.`)
-    }
-
-    setAudioTracksOk(true)
-    setIsListening(true)
-    startChunkLoop(sysStream)
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // MODO: "Solo Micrófono" → sólo SpeechRecognition (sin Whisper)
-  // ─────────────────────────────────────────────────────────
-  // (la voz del usuario se cubre por SpeechRecognition)
 
   // ─────────────────────────────────────────────────────────
   // Ciclo de vida
@@ -481,15 +320,10 @@ export function useLiveSession() {
     setWordCount(0)
     setDuration(0)
     setAudioTracksOk(false)
+    setMeetingInterim('')
     pendingTextRef.current = ''
     transcriptRef.current  = []
-
-    // Crear AudioContext dentro del gesto del usuario
-    try {
-      const ctx = new AudioContext({ sampleRate: 16000 })
-      await ctx.resume()
-      audioContextRef.current = ctx
-    } catch { /**/ }
+    meetingBufferRef.current = ''
 
     try {
       const res = await fetch('/api/meetings', {
@@ -504,23 +338,9 @@ export function useLiveSession() {
       sessionStartRef.current  = Date.now()
       shouldRestartRef.current = true
 
-      const mode = audioModeRef.current
-      addLog(`Iniciando modo: ${mode}`)
-
-      // SpeechRecognition siempre activo (voz local instantánea)
+      // Voz del usuario (instantánea) + audio de la reunión (pestaña/pantalla)
       launchSpeechRecognition()
-
-      if (mode === 'both') {
-        await launchCombinedCapture()
-      } else if (mode === 'tab') {
-        await launchTabCapture()
-      } else if (mode === 'dual') {
-        await launchDualCapture()
-      } else {
-        // 'mic': sólo SpeechRecognition (ya lanzado)
-        setIsListening(true)
-        setAudioTracksOk(true)
-      }
+      await launchMeetingCapture()
 
       timerRef.current = setInterval(() => setDuration(d => d + 1), DURATION_TICK_MS)
       setStatus('active')
@@ -542,9 +362,11 @@ export function useLiveSession() {
 
     try { recognitionRef.current?.abort() } catch { /**/ }
     recognitionRef.current = null
+    flushMeetingBuffer()
     stopAllStreams()
     setIsListening(false)
     setInterimText('')
+    setMeetingInterim('')
 
     if (timerRef.current)        clearInterval(timerRef.current)
     if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current)
@@ -575,17 +397,16 @@ export function useLiveSession() {
 
   const resetSession = useCallback(() => {
     setStatus('idle'); setMeetingId(null); setTranscript([]); setSuggestions([])
-    setWordCount(0); setDuration(0); setError(null); setInterimText('')
+    setWordCount(0); setDuration(0); setError(null); setInterimText(''); setMeetingInterim('')
     setAudioTracksOk(false)
     pendingTextRef.current = ''
     transcriptRef.current  = []
+    meetingBufferRef.current = ''
   }, [])
 
   return {
     status, meetingId, transcript, suggestions, wordCount, duration,
-    error, isListening, interimText, audioTracksOk, debugLogs,
-    audioMode, setAudioMode,
-    userMicId, setUserMicId, systemMicId, setSystemMicId,
+    error, isListening, interimText, meetingInterim, audioTracksOk, debugLogs,
     startSession, endSession, askAI, clearSuggestions, setDocumentContext, resetSession,
   }
 }

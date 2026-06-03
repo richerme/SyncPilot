@@ -35,32 +35,6 @@ export default function LivePage() {
   const [translations, setTranslations] = useState<Record<string, string>>({})
   const translatingRef = useRef<Set<string>>(new Set())
 
-  // Devices (audioinput) para selectores de modo
-  const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
-
-  const refreshDevices = async () => {
-    try {
-      const d = await navigator.mediaDevices.enumerateDevices()
-      const inputs = d.filter(x => x.kind === 'audioinput')
-      setDevices(inputs)
-    } catch { /* ignore */ }
-  }
-
-  useEffect(() => {
-    refreshDevices()
-    navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices)
-    return () => navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices)
-  }, [])
-
-  const handleGrantPermissions = async () => {
-    try {
-      // Sólo necesario una vez: pide permiso para que enumerateDevices muestre labels.
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      stream.getTracks().forEach(t => t.stop())
-      await refreshDevices()
-    } catch { /* ignore */ }
-  }
-
   const transcriptRef     = useRef<HTMLDivElement>(null)
   const suggestRef        = useRef<HTMLDivElement>(null)
   const atBottomSuggest   = useRef(true)
@@ -98,11 +72,11 @@ export default function LivePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.transcript.length, liveTranslatorEnabled])
 
-  // Auto-scroll transcript
+  // Auto-scroll transcript (incluye los previews en vivo)
   useEffect(() => {
     const c = transcriptRef.current
     if (c) c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' })
-  }, [session.transcript.length, session.interimText])
+  }, [session.transcript.length, session.interimText, session.meetingInterim])
 
   // Auto-scroll suggestions
   useEffect(() => {
@@ -179,7 +153,7 @@ export default function LivePage() {
               <span className="text-xs px-2 py-1 rounded-full flex items-center gap-1.5"
                 style={{ background: session.audioTracksOk ? 'rgb(16 185 129/0.1)' : 'rgb(245 158 11/0.1)', color: session.audioTracksOk ? '#10B981' : '#F59E0B' }}>
                 <span className={`w-1.5 h-1.5 rounded-full ${session.audioTracksOk ? 'bg-green-400 animate-pulse' : 'bg-amber-400'}`} />
-                {session.audioTracksOk ? '🎧 Pestaña + Mic' : '🎙️ Solo Mic'}
+                {session.audioTracksOk ? '🎧 Reunión + Tu voz' : '🎙️ Solo tu voz'}
               </span>
             </>
           )}
@@ -211,15 +185,15 @@ export default function LivePage() {
           </div>
 
           <div ref={transcriptRef} className="flex-1 overflow-y-auto p-4 space-y-1.5">
-            {session.transcript.length === 0 ? (
+            {session.transcript.length === 0 && !session.interimText && !session.meetingInterim ? (
               <div className="flex flex-col items-center justify-center h-full text-center py-16">
                 <div className="text-4xl mb-3">🎙️</div>
                 <p className="text-sm font-medium text-white">
                   {isIdle ? 'Inicia la sesión para comenzar' : isActive ? 'Escuchando...' : 'Sin transcripción'}
                 </p>
                 <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
-                  {isActive ? 'Tu voz aparece en azul, el audio de reunión en blanco.'
-                    : 'Usa Chrome o Edge. La reunión debe estar en una pestaña del navegador.'}
+                  {isActive ? 'Tu voz aparece en azul, el audio de la reunión en blanco.'
+                    : 'Usa Chrome o Edge. Comparte la pestaña/pantalla de la reunión con audio.'}
                 </p>
               </div>
             ) : (
@@ -249,7 +223,16 @@ export default function LivePage() {
               })
             )}
 
-            {/* Interim (preview en tiempo real de la voz del usuario) */}
+            {/* Preview en tiempo real del audio de la reunión (blanco) */}
+            {isActive && session.meetingInterim && (
+              <div className="transcript-line active opacity-70">
+                <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
+                <span className="text-xs font-semibold mr-1.5" style={{ color: '#e2e8f0' }}>Reunión:</span>
+                <span className="text-sm italic" style={{ color: '#e2e8f0' }}>{session.meetingInterim}</span>
+              </div>
+            )}
+
+            {/* Preview en tiempo real de la voz del usuario (azul) */}
             {isActive && session.interimText && (
               <div className="transcript-line active opacity-60">
                 <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
@@ -341,130 +324,28 @@ export default function LivePage() {
         {isIdle && (
           <div className="flex flex-col items-center gap-3 w-full max-w-2xl">
 
-            {/* Selector de modo */}
-            <div className="flex flex-wrap items-center justify-center gap-1 p-1 rounded-xl"
-              style={{ background: 'var(--color-surface)' }}>
-              <button onClick={() => session.setAudioMode('mic')}
-                className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
-                style={session.audioMode === 'mic'
-                  ? { background: 'var(--color-bg-card)', color: 'white', boxShadow: '0 1px 4px rgb(0 0 0/0.3)' }
-                  : { color: 'var(--color-text-muted)' }}>
-                🎙️ Solo Micrófono
-              </button>
-              <button onClick={() => session.setAudioMode('tab')}
-                className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
-                style={session.audioMode === 'tab'
-                  ? { background: 'var(--color-bg-card)', color: 'white', boxShadow: '0 1px 4px rgb(0 0 0/0.3)' }
-                  : { color: 'var(--color-text-muted)' }}>
-                🖥️ Solo Pestaña
-              </button>
-              <button onClick={() => session.setAudioMode('both')}
-                className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
-                style={session.audioMode === 'both'
-                  ? { background: 'var(--color-bg-card)', color: 'white', border: '1px solid #6366F1', boxShadow: '0 0 8px rgba(99,102,241,0.3)' }
-                  : { color: 'var(--color-text-muted)' }}>
-                🎧 Reunión Completa (Pestaña + Micrófono)
-              </button>
-              <button onClick={() => session.setAudioMode('dual')}
-                className="px-3 py-2 rounded-lg text-xs font-semibold transition-all"
-                style={session.audioMode === 'dual'
-                  ? { background: 'var(--color-bg-card)', color: 'white', border: '1px solid #10B981', boxShadow: '0 0 8px rgba(16,185,129,0.3)' }
-                  : { color: 'var(--color-text-muted)' }}>
-                🎛️ Avanzado (Cable Virtual)
-              </button>
+            {/* Modo único: Reunión en Vivo */}
+            <div className="w-full p-4 rounded-xl border space-y-2"
+              style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
+              <p className="font-semibold text-white flex items-center gap-2">🎧 Reunión en Vivo</p>
+              <p className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                Transcribe la reunión completa: el <strong>audio de los participantes</strong> (en blanco) y <strong>tu voz</strong> (en azul), en tiempo real.
+              </p>
+              <p className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                Al iniciar, en el diálogo del navegador elige la <strong>Pestaña</strong> (Teams/Zoom/Meet Web) o <strong>Toda la pantalla</strong> (apps de escritorio) y marca ✓ <strong>Compartir audio</strong>.
+              </p>
+              {docCount > 0 && (
+                <p className="text-xs" style={{ color: '#818CF8' }}>
+                  📄 {docCount} documento{docCount > 1 ? 's' : ''} de contexto cargado{docCount > 1 ? 's' : ''} — el Copiloto los usará para responder.
+                </p>
+              )}
             </div>
-
-            {/* Dispositivos de captura: configuración común a todos los modos */}
-            <div className="w-full p-3 rounded-xl border space-y-2"
-              style={{ borderColor: 'var(--color-surface-border)', background: 'var(--color-surface)' }}>
-              <p className="text-xs font-semibold text-white">Dispositivos de captura</p>
-              <div className="space-y-2">
-                <div>
-                  <label className="block text-xs mb-1" style={{ color: 'var(--color-text-secondary)' }}>
-                    🎤 Tu voz (Micrófono principal)
-                  </label>
-                  <select value={session.userMicId} onChange={e => session.setUserMicId(e.target.value)}
-                    className="w-full text-xs px-3 py-2 rounded-lg bg-transparent border text-white"
-                    style={{ borderColor: 'var(--color-surface-border)' }}>
-                    <option value="default">Automático (Predeterminado del Sistema)</option>
-                    {devices.map(d => (
-                      <option key={d.deviceId} value={d.deviceId}>{d.label || `Micrófono ${d.deviceId.slice(0,5)}…`}</option>
-                    ))}
-                  </select>
-                </div>
-                {session.audioMode === 'dual' && (
-                  <div>
-                    <label className="block text-xs mb-1" style={{ color: 'var(--color-text-secondary)' }}>
-                      🔊 Audio del sistema (Stereo Mix / VB-Cable)
-                    </label>
-                    <select value={session.systemMicId} onChange={e => session.setSystemMicId(e.target.value)}
-                      className="w-full text-xs px-3 py-2 rounded-lg bg-transparent border text-white"
-                      style={{ borderColor: 'var(--color-surface-border)' }}>
-                      <option value="none">No capturar</option>
-                      <option value="default">Automático (Predeterminado del Sistema)</option>
-                      {devices.map(d => (
-                        <option key={d.deviceId} value={d.deviceId}>{d.label || `Dispositivo ${d.deviceId.slice(0,5)}…`}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-                {devices.length === 0 && (
-                  <button onClick={handleGrantPermissions}
-                    className="text-xs underline" style={{ color: '#818CF8' }}>
-                    Otorgar permisos para detectar dispositivos
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Tips por modo */}
-            {session.audioMode === 'both' && (
-              <div className="w-full p-3 rounded-xl border text-xs space-y-1"
-                style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
-                <p className="font-semibold text-white">🎧 Reunión Completa — Pestaña + Micrófono</p>
-                <p style={{ color: 'var(--color-text-secondary)' }}>
-                  Al iniciar, en el diálogo del navegador elige <strong>Pestaña</strong> (Teams Web / Zoom Web / Meet) o <strong>Toda la pantalla</strong> y marca ✓ <strong>Compartir audio</strong>. El audio de la pestaña/sistema y tu micrófono se mezclan y se transcriben juntos.
-                </p>
-                <p style={{ color: 'var(--color-text-muted)' }}>
-                  ⚠️ Para <strong>Teams Desktop / Zoom Desktop</strong> con audífonos Bluetooth en modo manos libres (HFP), Chrome NO captura el audio del sistema. Usa el modo <strong>Avanzado (Cable Virtual)</strong>.
-                </p>
-              </div>
-            )}
-            {session.audioMode === 'tab' && (
-              <div className="w-full p-3 rounded-xl border text-xs space-y-1"
-                style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
-                <p className="font-semibold text-white">🖥️ Solo Pestaña</p>
-                <p style={{ color: 'var(--color-text-secondary)' }}>
-                  Captura sólo el audio compartido (pestaña / toda la pantalla). Útil cuando NO quieres que tu micrófono se mezcle. Tu voz seguirá apareciendo en azul vía reconocimiento del navegador.
-                </p>
-              </div>
-            )}
-            {session.audioMode === 'dual' && (
-              <div className="w-full p-3 rounded-xl border text-xs space-y-1"
-                style={{ borderColor: 'rgba(16,185,129,0.3)', background: 'rgba(16,185,129,0.05)' }}>
-                <p className="font-semibold text-white">🎛️ Avanzado (Cable Virtual)</p>
-                <p style={{ color: 'var(--color-text-secondary)' }}>
-                  Para <strong>Teams Desktop / Zoom Desktop</strong>: instala <strong>VB-CABLE</strong> (Windows) o activa <strong>Stereo Mix</strong>, configura tu app de reunión para enviar el audio al cable, y selecciónalo en &quot;Audio del sistema&quot;.
-                </p>
-                <p style={{ color: 'var(--color-text-muted)' }}>
-                  ⚠️ NO selecciones tu auricular Bluetooth ni un micrófono regular como &quot;Audio del sistema&quot; — sólo capturará tu voz. Necesita ser un dispositivo de loopback.
-                </p>
-              </div>
-            )}
-            {session.audioMode === 'mic' && (
-              <div className="w-full p-3 rounded-xl border text-xs"
-                style={{ borderColor: 'var(--color-surface-border)', background: 'var(--color-surface)' }}>
-                <p style={{ color: 'var(--color-text-secondary)' }}>
-                  🎙️ Solo se transcribirá tu voz desde el micrófono. Útil para dictado o monólogos.
-                </p>
-              </div>
-            )}
 
             <button onClick={session.startSession} className="btn-primary flex items-center gap-2 px-8 py-3">
               <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
-              Iniciar sesión de IA
+              Iniciar Reunión en Vivo
             </button>
           </div>
         )}

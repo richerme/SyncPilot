@@ -2,7 +2,7 @@ import OpenAI, { toFile } from 'openai'
 import { GoogleGenAI } from '@google/genai'
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions'
-const MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash-lite-preview-06-17'
+const MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash-lite'
 
 interface TextMessage {
   type: 'text'
@@ -69,34 +69,57 @@ function getGenAI(): GoogleGenAI | null {
   return genaiClient
 }
 
+// Lanza si Gemini no está disponible o la API falla, para que la ruta pueda
+// caer a Whisper SOLO ante un error real (no ante silencio legítimo, que se
+// devuelve como '[SILENCIO]'/'' sin gastar llamadas a OpenAI).
 export async function transcribeAudioGemini(audioBase64: string, mimeType: string): Promise<string> {
   const ai = getGenAI()
+  if (!ai) throw new Error('GEMINI_API_KEY no configurada')
+
+  const result = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{
+      role: 'user',
+      parts: [
+        { inlineData: { mimeType: mimeType.split(';')[0], data: audioBase64 } },
+        {
+          text: `Transcribe exactly as spoken. Rules:
+- ONLY output the spoken text, nothing else
+- Keep original language (Spanish/English/mixed)
+- If silence or noise only, return: [SILENCIO]
+- If multiple speakers, separate with line breaks`,
+        },
+      ],
+    }],
+    config: { temperature: 0.05, maxOutputTokens: 256 },
+  })
+  return (result.text ?? '').trim()
+}
+
+// Extrae texto de un documento (PDF) usando Gemini, que acepta PDF como
+// inlineData nativamente. Se usa al subir documentos de contexto para que
+// la reunión pueda apoyarse en su contenido.
+export async function extractTextFromPdf(base64: string): Promise<string> {
+  const ai = getGenAI()
   if (!ai) {
-    console.error('[transcribeAudioGemini] GEMINI_API_KEY no configurada')
+    console.error('[extractTextFromPdf] GEMINI_API_KEY no configurada')
     return ''
   }
-
   try {
     const result = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [{
         role: 'user',
         parts: [
-          { inlineData: { mimeType: mimeType.split(';')[0], data: audioBase64 } },
-          {
-            text: `Transcribe exactly as spoken. Rules:
-- ONLY output the spoken text, nothing else
-- Keep original language (Spanish/English/mixed)
-- If silence or noise only, return: [SILENCIO]
-- If multiple speakers, separate with line breaks`,
-          },
+          { inlineData: { mimeType: 'application/pdf', data: base64 } },
+          { text: 'Extrae TODO el texto de este documento tal cual, sin resumir ni añadir comentarios. Conserva el orden y los saltos de párrafo.' },
         ],
       }],
-      config: { temperature: 0.05, maxOutputTokens: 256 },
+      config: { temperature: 0, maxOutputTokens: 8192 },
     })
     return (result.text ?? '').trim()
   } catch (err) {
-    console.error('[transcribeAudioGemini] error:', err instanceof Error ? err.message : err)
+    console.error('[extractTextFromPdf] error:', err instanceof Error ? err.message : err)
     return ''
   }
 }

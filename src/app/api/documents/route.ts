@@ -3,6 +3,7 @@ import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { writeFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
+import { extractTextFromPdf } from '@/lib/openrouter'
 
 export async function GET() {
   const session = await auth()
@@ -42,10 +43,14 @@ export async function POST(request: Request) {
   const buffer = Buffer.from(await file.arrayBuffer())
   await writeFile(filePath, buffer)
 
-  // Extraer texto plano (solo para .txt y .md)
+  // Extraer texto para usarlo como contexto de reunión.
+  // .txt/.md: lectura directa. .pdf: Gemini (acepta PDF nativo).
   let extractedText: string | null = null
   if (['txt', 'md'].includes(ext)) {
     extractedText = buffer.toString('utf-8').slice(0, 50000)
+  } else if (ext === 'pdf') {
+    const text = await extractTextFromPdf(buffer.toString('base64'))
+    extractedText = text ? text.slice(0, 50000) : null
   }
 
   const doc = await prisma.contextDocument.create({

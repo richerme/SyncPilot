@@ -24,13 +24,14 @@ export async function POST(request: Request) {
 
   const { audio_base64, mime_type } = parsed.data
 
-  // Primario: Gemini (decodifica WebM/Opus mezclado de forma robusta).
-  let text = await transcribeAudioGemini(audio_base64, mime_type)
-
-  // Respaldo: Whisper si Gemini no está configurado o no devolvió texto útil.
-  if (isSilence(text)) {
-    const fallback = await transcribeAudio(audio_base64, mime_type)
-    if (!isSilence(fallback)) text = fallback
+  // Primario: Gemini (decodifica WebM/Opus de forma robusta). Respaldo: Whisper,
+  // SOLO si Gemini lanza error o no está configurado (no ante silencio legítimo).
+  let text = ''
+  try {
+    text = await transcribeAudioGemini(audio_base64, mime_type)
+  } catch (err) {
+    console.warn('[live/transcribe] Gemini falló, usando Whisper:', err instanceof Error ? err.message : err)
+    text = await transcribeAudio(audio_base64, mime_type)
   }
 
   if (isSilence(text)) return NextResponse.json({ text: '' })
