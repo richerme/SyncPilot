@@ -1,4 +1,5 @@
 import OpenAI, { toFile } from 'openai'
+import { GoogleGenAI } from '@google/genai'
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash-lite-preview-06-17'
@@ -53,6 +54,51 @@ function getOpenAI(): OpenAI {
     openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   }
   return openaiClient
+}
+
+// Transcripción con Gemini (gemini-2.5-flash). Decodifica de forma robusta los
+// chunks WebM/Opus cortos que produce MediaRecorder desde un stream mezclado
+// (mic + pestaña/sistema), donde Whisper suele devolver vacío. Es el backend
+// primario para "IA en Vivo".
+let genaiClient: GoogleGenAI | null = null
+function getGenAI(): GoogleGenAI | null {
+  if (!process.env.GEMINI_API_KEY) return null
+  if (!genaiClient) {
+    genaiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+  }
+  return genaiClient
+}
+
+export async function transcribeAudioGemini(audioBase64: string, mimeType: string): Promise<string> {
+  const ai = getGenAI()
+  if (!ai) {
+    console.error('[transcribeAudioGemini] GEMINI_API_KEY no configurada')
+    return ''
+  }
+
+  try {
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: mimeType.split(';')[0], data: audioBase64 } },
+          {
+            text: `Transcribe exactly as spoken. Rules:
+- ONLY output the spoken text, nothing else
+- Keep original language (Spanish/English/mixed)
+- If silence or noise only, return: [SILENCIO]
+- If multiple speakers, separate with line breaks`,
+          },
+        ],
+      }],
+      config: { temperature: 0.05, maxOutputTokens: 256 },
+    })
+    return (result.text ?? '').trim()
+  } catch (err) {
+    console.error('[transcribeAudioGemini] error:', err instanceof Error ? err.message : err)
+    return ''
+  }
 }
 
 export async function transcribeAudio(audioBase64: string, mimeType: string): Promise<string> {

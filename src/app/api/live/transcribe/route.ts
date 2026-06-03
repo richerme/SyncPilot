@@ -1,12 +1,18 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
-import { transcribeAudio } from '@/lib/openrouter'
+import { transcribeAudio, transcribeAudioGemini } from '@/lib/openrouter'
 import { z } from 'zod'
 
 const Schema = z.object({
   audio_base64: z.string().min(10),
   mime_type:    z.string().default('audio/webm'),
 })
+
+const SILENCE = ['[SILENCIO]', '[SILENCE]', '[NO SPEECH]', '[NO AUDIO]', '[INAUDIBLE]', '(silencio)', '(silence)']
+
+function isSilence(text: string): boolean {
+  return !text || text.length < 2 || SILENCE.some(p => text.toUpperCase().includes(p.toUpperCase()))
+}
 
 export async function POST(request: Request) {
   const session = await auth()
@@ -16,12 +22,18 @@ export async function POST(request: Request) {
   const parsed = Schema.safeParse(body)
   if (!parsed.success) return NextResponse.json({ error: 'Datos inválidos' }, { status: 400 })
 
-  const text = await transcribeAudio(parsed.data.audio_base64, parsed.data.mime_type)
+  const { audio_base64, mime_type } = parsed.data
 
-  const SILENCE = ['[SILENCIO]', '[SILENCE]', '[NO SPEECH]', '[NO AUDIO]', '[INAUDIBLE]']
-  if (!text || text.length < 2 || SILENCE.some(p => text.toUpperCase().includes(p))) {
-    return NextResponse.json({ text: '' })
+  // Primario: Gemini (decodifica WebM/Opus mezclado de forma robusta).
+  let text = await transcribeAudioGemini(audio_base64, mime_type)
+
+  // Respaldo: Whisper si Gemini no está configurado o no devolvió texto útil.
+  if (isSilence(text)) {
+    const fallback = await transcribeAudio(audio_base64, mime_type)
+    if (!isSilence(fallback)) text = fallback
   }
+
+  if (isSilence(text)) return NextResponse.json({ text: '' })
 
   return NextResponse.json({ text })
 }
