@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
-import { transcribeAudio, chatCompletion } from '@/lib/openrouter'
+import { transcribe, chatCompletion } from '@/lib/openrouter'
 import { z } from 'zod'
 
 const Schema = z.object({
@@ -18,7 +18,7 @@ export async function POST(request: Request) {
 
   const { audio_base64, mime_type } = parsed.data
 
-  const transcribedText = await transcribeAudio(audio_base64, mime_type)
+  const transcribedText = await transcribe(audio_base64, mime_type)
   if (!transcribedText || transcribedText.length < 3) {
     return NextResponse.json({ error: 'No se detectó habla suficiente. Graba al menos 5 segundos hablando.' }, { status: 422 })
   }

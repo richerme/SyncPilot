@@ -26,7 +26,7 @@ export default function AudioTranslatorTab() {
       const res = await translateAudio(base64, mimeType, targetLang, withTTS)
       setResult(res)
       if (res.audioBase64) {
-        const blob = new Blob([Uint8Array.from(atob(res.audioBase64), c => c.charCodeAt(0))], { type: 'audio/mpeg' })
+        const blob = new Blob([Uint8Array.from(atob(res.audioBase64), c => c.charCodeAt(0))], { type: 'audio/wav' })
         setAudioUrl(URL.createObjectURL(blob))
       }
     } catch (e) {
@@ -61,7 +61,7 @@ export default function AudioTranslatorTab() {
 
   function downloadAudio() {
     if (!audioUrl) return
-    const a = document.createElement('a'); a.href = audioUrl; a.download = 'traduccion.mp3'; a.click()
+    const a = document.createElement('a'); a.href = audioUrl; a.download = 'traduccion.wav'; a.click()
   }
 
   return (

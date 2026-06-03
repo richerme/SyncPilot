@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
-import { transcribeAudio, transcribeAudioGemini } from '@/lib/openrouter'
+import { transcribe } from '@/lib/openrouter'
 import { z } from 'zod'
 
 const Schema = z.object({
@@ -24,15 +24,8 @@ export async function POST(request: Request) {
 
   const { audio_base64, mime_type } = parsed.data
 
-  // Primario: Gemini (decodifica WebM/Opus de forma robusta). Respaldo: Whisper,
-  // SOLO si Gemini lanza error o no está configurado (no ante silencio legítimo).
-  let text = ''
-  try {
-    text = await transcribeAudioGemini(audio_base64, mime_type)
-  } catch (err) {
-    console.warn('[live/transcribe] Gemini falló, usando Whisper:', err instanceof Error ? err.message : err)
-    text = await transcribeAudio(audio_base64, mime_type)
-  }
+  // Gemini primario, Whisper de respaldo (ver lib/openrouter#transcribe).
+  const text = await transcribe(audio_base64, mime_type)
 
   if (isSilence(text)) return NextResponse.json({ text: '' })
 

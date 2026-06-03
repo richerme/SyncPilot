@@ -124,6 +124,17 @@ export async function extractTextFromPdf(base64: string): Promise<string> {
   }
 }
 
+// Transcripción unificada: Gemini primario, Whisper como respaldo SOLO si
+// Gemini lanza error o no está configurado. Úsala en todas las features de voz.
+export async function transcribe(audioBase64: string, mimeType: string): Promise<string> {
+  try {
+    return await transcribeAudioGemini(audioBase64, mimeType)
+  } catch (err) {
+    console.warn('[transcribe] Gemini falló, usando Whisper:', err instanceof Error ? err.message : err)
+    return await transcribeAudio(audioBase64, mimeType)
+  }
+}
+
 export async function transcribeAudio(audioBase64: string, mimeType: string): Promise<string> {
   if (!process.env.OPENAI_API_KEY) {
     console.error('[transcribeAudio] OPENAI_API_KEY no configurada')

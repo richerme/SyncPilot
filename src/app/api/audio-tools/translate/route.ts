@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
-import { transcribeAudio, chatCompletion } from '@/lib/openrouter'
+import { transcribe, chatCompletion } from '@/lib/openrouter'
 import { synthesizeSpeech } from '@/lib/tts'
 import { z } from 'zod'
 
@@ -30,7 +30,7 @@ export async function POST(request: Request) {
 
   try {
     // 1. Transcribir audio
-    const originalText = await transcribeAudio(audio_base64, mime_type)
+    const originalText = await transcribe(audio_base64, mime_type)
     if (!originalText || originalText.length < 2) {
       return NextResponse.json({ error: 'No se detectó habla en el audio' }, { status: 422 })
     }

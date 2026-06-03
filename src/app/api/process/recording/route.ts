@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
-import { chatCompletion, transcribeAudio } from '@/lib/openrouter'
+import { chatCompletion, transcribe } from '@/lib/openrouter'
 import { z } from 'zod'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -87,7 +87,7 @@ export async function POST(request: Request) {
         const buffer = await readFile(chunkPath)
         const base64 = buffer.toString('base64')
 
-        const text = await transcribeAudio(base64, 'audio/webm')
+        const text = await transcribe(base64, 'audio/webm')
         const issilence = !text || text.length < 2 || SILENCE_PATTERNS.some(p => text.toUpperCase().includes(p))
 
         if (!issilence) {
@@ -104,7 +104,7 @@ export async function POST(request: Request) {
       // Fallback: leer el archivo completo como audio (puede fallar con archivos grandes)
       const buffer = await readFile(videoPath)
       const base64 = buffer.toString('base64')
-      const text = await transcribeAudio(base64, 'video/webm')
+      const text = await transcribe(base64, 'video/webm')
       if (text && text.length > 2) {
         transcriptSegments = [{ startMs: 0, endMs: 60000, text }]
         fullTranscript = text

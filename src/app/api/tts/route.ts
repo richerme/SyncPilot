@@ -21,9 +21,9 @@ export async function POST(request: Request) {
 
   return new NextResponse(audioBuffer as unknown as BodyInit, {
     headers: {
-      'Content-Type':        'audio/mpeg',
+      'Content-Type':        'audio/wav',
       'Content-Length':      String(audioBuffer.length),
-      'Content-Disposition': 'inline; filename="speech.mp3"',
+      'Content-Disposition': 'inline; filename="speech.wav"',
     },
   })
 }
