@@ -60,10 +60,20 @@ export async function POST(request: Request) {
   if (!recording) return NextResponse.json({ error: 'Grabación no encontrada' }, { status: 404 })
   if (!recording.storagePath) return NextResponse.json({ error: 'El video aún no se ha subido' }, { status: 400 })
 
-  await prisma.recording.update({ where: { id: recordingId }, data: { status: 'processing' } })
-
   const videoPath = path.join(uploadDir, recording.storagePath)
   const tmpDir = path.join(uploadDir, session.user.id, recordingId, 'tmp')
+
+  // El archivo puede no existir (p. ej. subido antes de montar el volumen
+  // persistente). Mejor un error claro que un 500 críptico de ffmpeg.
+  if (!existsSync(videoPath)) {
+    await prisma.recording.update({ where: { id: recordingId }, data: { status: 'error' } }).catch(() => {})
+    return NextResponse.json(
+      { error: 'El archivo de video ya no está disponible en el servidor. Vuelve a subir la grabación.' },
+      { status: 410 }
+    )
+  }
+
+  await prisma.recording.update({ where: { id: recordingId }, data: { status: 'processing' } })
 
   try {
     // 1. Limpiar datos anteriores

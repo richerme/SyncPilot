@@ -50,5 +50,11 @@ export async function GET() {
     },
   })
 
-  return NextResponse.json({ recordings })
+  // fileSizeBytes es BigInt en Prisma; JSON.stringify no lo serializa.
+  return NextResponse.json({
+    recordings: recordings.map(r => ({
+      ...r,
+      fileSizeBytes: r.fileSizeBytes ? Number(r.fileSizeBytes) : null,
+    })),
+  })
 }
