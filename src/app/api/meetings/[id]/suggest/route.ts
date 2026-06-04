@@ -31,9 +31,15 @@ export async function POST(request: Request, { params }: RouteParams) {
   const { transcript_segment, context_before, document_context } = parsed.data
 
   const prompt = `Eres un asistente invisible en una reunión de trabajo. Analiza lo que se está hablando y proporciona sugerencias útiles y concisas.
-REGLA: El idioma de tus sugerencias debe coincidir con el idioma del transcript.
-Responde SOLO con un JSON array:
-[{ "type": "reply|question|info|warning", "text": "sugerencia aquí" }]
+
+⚠️ REGLA DE IDIOMA (LA MÁS IMPORTANTE):
+1. Detecta el idioma en el que está escrita la "TRANSCRIPCIÓN ACTUAL" de abajo.
+2. Escribe el campo "text" de TODAS tus sugerencias EXACTAMENTE en ese mismo idioma.
+3. Si la reunión es en inglés, responde en inglés. Si es en español, responde en español. Si es en otro idioma, usa ese idioma.
+4. NO traduzcas ni cambies de idioma bajo ninguna circunstancia, aunque estas instrucciones estén en español.
+
+Responde SOLO con un JSON array (las claves "type" en inglés; solo el contenido de "text" cambia de idioma):
+[{ "type": "reply|question|info|warning", "text": "..." }]
 - "reply": Respuesta o comentario que el usuario podría decir
 - "question": Pregunta útil para aclarar algo
 - "info": Información relevante basándote en los documentos de referencia

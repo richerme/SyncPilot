@@ -168,7 +168,7 @@ export default function LivePage() {
       <div className="flex-1 flex overflow-hidden">
 
         {/* Columna transcript */}
-        <div className="flex-1 flex flex-col border-r" style={{ borderColor: 'var(--color-surface-border)' }}>
+        <div className="flex-1 min-w-0 flex flex-col border-r" style={{ borderColor: 'var(--color-surface-border)' }}>
           <div className="flex items-center justify-between px-4 py-2.5 border-b text-sm font-semibold text-white"
             style={{ borderColor: 'var(--color-surface-border)' }}>
             <span>Transcripción en vivo</span>
@@ -183,6 +183,15 @@ export default function LivePage() {
               )}
             </div>
           </div>
+
+          {/* Sub-cabecera de columnas cuando la traducción está activa */}
+          {liveTranslatorEnabled && (
+            <div className="grid grid-cols-2 gap-4 px-4 py-1.5 border-b text-xs font-semibold flex-shrink-0"
+              style={{ borderColor: 'var(--color-surface-border)', color: 'var(--color-text-muted)' }}>
+              <span>Original</span>
+              <span className="flex items-center gap-1">🌐 Traducción ({liveTranslatorLang.toUpperCase()})</span>
+            </div>
+          )}
 
           <div ref={transcriptRef} className="flex-1 overflow-y-auto p-4 space-y-1.5">
             {session.transcript.length === 0 && !session.interimText && !session.meetingInterim ? (
@@ -199,9 +208,36 @@ export default function LivePage() {
             ) : (
               session.transcript.map((seg, i) => {
                 const sp = SPEAKER_STYLES[seg.speaker ?? 'null'] ?? SPEAKER_STYLES['meeting']
+                const isLast = i === session.transcript.length - 1
+
+                // Layout en 2 columnas iguales cuando la traducción está activa
+                if (liveTranslatorEnabled) {
+                  return (
+                    <div key={seg.id}
+                      className={`grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md transition-colors ${isLast ? 'bg-indigo-500/[0.08]' : ''}`}>
+                      <div className="flex items-start gap-1.5 min-w-0">
+                        <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+                          {fmtDuration(Math.round(seg.start_ms / 1000))}
+                        </span>
+                        {seg.speaker && (
+                          <span className="text-xs font-semibold flex-shrink-0" style={{ color: sp.color }}>
+                            {sp.label}:
+                          </span>
+                        )}
+                        <span className="text-sm break-words" style={{ color: sp.color }}>{seg.text}</span>
+                      </div>
+                      <div className="border-l pl-4 min-w-0" style={{ borderColor: 'var(--color-surface-border)' }}>
+                        {translations[seg.id]
+                          ? <span className="text-sm break-words" style={{ color: '#06B6D4' }}>{translations[seg.id]}</span>
+                          : <span className="text-xs italic" style={{ color: 'var(--color-text-muted)' }}>Traduciendo…</span>}
+                      </div>
+                    </div>
+                  )
+                }
+
                 return (
                   <div key={seg.id}
-                    className={`transcript-line ${i === session.transcript.length - 1 ? 'active' : ''}`}>
+                    className={`transcript-line ${isLast ? 'active' : ''}`}>
                     <span className="text-xs mr-1.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
                       {fmtDuration(Math.round(seg.start_ms / 1000))}
                     </span>
@@ -211,13 +247,7 @@ export default function LivePage() {
                         {sp.label}:
                       </span>
                     )}
-                    <span className="text-sm" style={{ color: sp.color }}>{seg.text}</span>
-                    {liveTranslatorEnabled && translations[seg.id] && (
-                      <span className="text-xs italic ml-1 opacity-70 block mt-0.5"
-                        style={{ color: '#06B6D4' }}>
-                        🌐 {translations[seg.id]}
-                      </span>
-                    )}
+                    <span className="text-sm break-words min-w-0" style={{ color: sp.color }}>{seg.text}</span>
                   </div>
                 )
               })
@@ -225,20 +255,42 @@ export default function LivePage() {
 
             {/* Preview en tiempo real del audio de la reunión (blanco) */}
             {isActive && session.meetingInterim && (
-              <div className="transcript-line active opacity-70">
-                <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
-                <span className="text-xs font-semibold mr-1.5" style={{ color: '#e2e8f0' }}>Reunión:</span>
-                <span className="text-sm italic" style={{ color: '#e2e8f0' }}>{session.meetingInterim}</span>
-              </div>
+              liveTranslatorEnabled ? (
+                <div className="grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md bg-indigo-500/[0.08] opacity-70">
+                  <div className="flex items-start gap-1.5 min-w-0">
+                    <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>•••</span>
+                    <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#e2e8f0' }}>Reunión:</span>
+                    <span className="text-sm italic break-words" style={{ color: '#e2e8f0' }}>{session.meetingInterim}</span>
+                  </div>
+                  <div className="border-l pl-4" style={{ borderColor: 'var(--color-surface-border)' }} />
+                </div>
+              ) : (
+                <div className="transcript-line active opacity-70">
+                  <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
+                  <span className="text-xs font-semibold mr-1.5" style={{ color: '#e2e8f0' }}>Reunión:</span>
+                  <span className="text-sm italic" style={{ color: '#e2e8f0' }}>{session.meetingInterim}</span>
+                </div>
+              )
             )}
 
             {/* Preview en tiempo real de la voz del usuario (azul) */}
             {isActive && session.interimText && (
-              <div className="transcript-line active opacity-60">
-                <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
-                <span className="text-xs font-semibold mr-1.5" style={{ color: '#818CF8' }}>Tú:</span>
-                <span className="text-sm italic" style={{ color: '#818CF8' }}>{session.interimText}</span>
-              </div>
+              liveTranslatorEnabled ? (
+                <div className="grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md bg-indigo-500/[0.08] opacity-60">
+                  <div className="flex items-start gap-1.5 min-w-0">
+                    <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>•••</span>
+                    <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#818CF8' }}>Tú:</span>
+                    <span className="text-sm italic break-words" style={{ color: '#818CF8' }}>{session.interimText}</span>
+                  </div>
+                  <div className="border-l pl-4" style={{ borderColor: 'var(--color-surface-border)' }} />
+                </div>
+              ) : (
+                <div className="transcript-line active opacity-60">
+                  <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
+                  <span className="text-xs font-semibold mr-1.5" style={{ color: '#818CF8' }}>Tú:</span>
+                  <span className="text-sm italic" style={{ color: '#818CF8' }}>{session.interimText}</span>
+                </div>
+              )
             )}
           </div>
         </div>
