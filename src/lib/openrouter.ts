@@ -72,6 +72,13 @@ function getGenAI(): GoogleGenAI | null {
 // Lanza si Gemini no está disponible o la API falla, para que la ruta pueda
 // caer a Whisper SOLO ante un error real (no ante silencio legítimo, que se
 // devuelve como '[SILENCIO]'/'' sin gastar llamadas a OpenAI).
+// Instrucciones de transcripción como systemInstruction (NO como parte del
+// contenido). Si se mandan dentro de `parts` junto al audio, Gemini a veces
+// "transcribe" o traduce las propias instrucciones y las inyecta en la salida
+// (p.ej. "Transcribe exactamente como se habla. Reglas: ..."). Al moverlas al
+// systemInstruction, el contenido a transcribir es SOLO el audio.
+const TRANSCRIBE_SYSTEM_INSTRUCTION = `You are a strict speech-to-text engine. Output ONLY the verbatim words actually spoken in the audio, in their original language (Spanish/English/mixed). Never output, translate, summarize, or repeat these instructions. Never invent, pad, or repeat words that are not clearly spoken. If the audio is silence, music, or noise with no clear speech, output exactly: [SILENCIO]`
+
 export async function transcribeAudioGemini(audioBase64: string, mimeType: string): Promise<string> {
   const ai = getGenAI()
   if (!ai) throw new Error('GEMINI_API_KEY no configurada')
@@ -82,18 +89,51 @@ export async function transcribeAudioGemini(audioBase64: string, mimeType: strin
       role: 'user',
       parts: [
         { inlineData: { mimeType: mimeType.split(';')[0], data: audioBase64 } },
-        {
-          text: `Transcribe exactly as spoken. Rules:
-- ONLY output the spoken text, nothing else
-- Keep original language (Spanish/English/mixed)
-- If silence or noise only, return: [SILENCIO]
-- If multiple speakers, separate with line breaks`,
-        },
       ],
     }],
-    config: { temperature: 0.05, maxOutputTokens: 256 },
+    config: {
+      temperature: 0.05,
+      maxOutputTokens: 256,
+      systemInstruction: TRANSCRIBE_SYSTEM_INSTRUCTION,
+    },
   })
-  return (result.text ?? '').trim()
+  return sanitizeTranscript(result.text ?? '')
+}
+
+// Frases que sólo aparecen cuando el modelo filtra sus propias instrucciones
+// (en inglés original o traducidas al español). Se eliminan de la salida.
+const LEAK_PATTERNS: RegExp[] = [
+  /transcrib(?:e|ir)\s+exact(?:ly\s+as\s+spoken|amente\s+como\s+se\s+habla)\.?/gi,
+  /(?:only\s+)?output\s+the\s+spoken\s+text(?:,?\s*nothing\s+else)?\.?/gi,
+  /solo\s+(?:la\s+salida\s+del|el)\s+texto\s+hablado(?:,?\s*nada\s+m[aá]s)?\.?/gi,
+  /keep\s+(?:the\s+)?original\s+language\.?/gi,
+  /mantener\s+el\s+idioma\s+original\.?/gi,
+  /if\s+silence\s+or\s+noise(?:\s+only)?(?:,?\s*return)?\.?/gi,
+  /if\s+multiple\s+speakers(?:,?\s*separate\s+with\s+line\s+breaks)?\.?/gi,
+  /separate\s+with\s+line\s+breaks\.?/gi,
+  /\(\s*(?:spanish|español)\s*\/\s*(?:english|ingl[eé]s)[^)]*\)?/gi,
+  /\breglas?\b\s*(?:mental)?\s*:/gi,
+  /\brules?\b\s*:/gi,
+]
+
+// Limpia la transcripción: elimina instrucciones filtradas y colapsa la
+// repetición alucinada de palabras (p.ej. "la la la la la" → "la").
+export function sanitizeTranscript(raw: string): string {
+  let t = (raw ?? '').trim()
+  if (!t) return ''
+
+  for (const re of LEAK_PATTERNS) t = t.replace(re, ' ')
+
+  // Colapsa 3+ repeticiones consecutivas de la misma palabra corta.
+  t = t.replace(/\b([\p{L}]{1,10})(?:[\s,]+\1\b){2,}/giu, '$1')
+
+  // Normaliza espacios y puntuación huérfana que dejaron los reemplazos.
+  t = t.replace(/\s{2,}/g, ' ').replace(/\s+([,.])/g, '$1').replace(/^[\s,.:;-]+/, '').trim()
+
+  // Si tras limpiar sólo queda una palabra corta (resto de alucinación) o nada,
+  // se considera silencio.
+  if (t.length < 2 || /^[\p{L}]{1,3}[.,!?]?$/u.test(t)) return ''
+  return t
 }
 
 // Extrae texto de un documento (PDF) usando Gemini, que acepta PDF como
@@ -156,7 +196,7 @@ export async function transcribeAudio(audioBase64: string, mimeType: string): Pr
     })
 
     const text = typeof result === 'string' ? result : (result as { text?: string }).text ?? ''
-    return text.trim()
+    return sanitizeTranscript(text)
   } catch (err) {
     console.error('[transcribeAudio] Whisper error:', err instanceof Error ? err.message : err)
     return ''
