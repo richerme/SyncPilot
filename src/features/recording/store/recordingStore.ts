@@ -174,15 +174,22 @@ export const useRecordingStore = create<RecordingState & RecordingActions>((set,
         micSource.connect(analyser)
         refs.analyser = analyser
 
-        const tick = () => {
+        // Buffer reutilizado (no se asigna uno nuevo por frame) y actualización
+        // del nivel limitada a ~12 fps: el medidor de audio se ve igual de fluido
+        // pero evita 60 setState/seg y la presión de GC durante grabaciones largas.
+        const data = new Uint8Array(analyser.frequencyBinCount)
+        let lastUpdate = 0
+        const tick = (now: number) => {
           if (!refs.analyser) return
-          const data = new Uint8Array(refs.analyser.frequencyBinCount)
-          refs.analyser.getByteFrequencyData(data)
-          const avg = data.reduce((a, b) => a + b, 0) / data.length
-          set({ audioLevel: Math.round((avg / 255) * 100) })
+          if (now - lastUpdate > 80) {
+            refs.analyser.getByteFrequencyData(data)
+            const avg = data.reduce((a, b) => a + b, 0) / data.length
+            set({ audioLevel: Math.round((avg / 255) * 100) })
+            lastUpdate = now
+          }
           refs.animationFrame = requestAnimationFrame(tick)
         }
-        tick()
+        refs.animationFrame = requestAnimationFrame(tick)
       }
 
       destination.stream.getAudioTracks().forEach(t => combinedStream.addTrack(t))

@@ -29,10 +29,12 @@ declare global {
 
 const SUGGEST_DEBOUNCE_MS  = 3000
 const DURATION_TICK_MS     = 1000
-// Ventana de captura de cada chunk de audio de la reunión. Más corta = la
-// transcripción aparece casi en tiempo real (estilo Teams). 1s da el mejor
-// equilibrio entre latencia y precisión de Gemini.
-const CHUNK_MS             = 1000
+// Ventana de captura de cada chunk de audio de la reunión. 1s daba la menor
+// latencia pero creaba un MediaRecorder + base64 + fetch cada segundo (3x el
+// churn del proyecto inicial de 3s), lo que junto a una grabación simultánea
+// llegaba a congelar la pestaña. 2s es el equilibrio: sigue siendo más rápido
+// que el inicial y reduce a la mitad la carga de CPU/red/GC.
+const CHUNK_MS             = 2000
 // La transcripción de la reunión se acumula como "preview" y se vuelca al
 // historial cuando hay una pausa (chunk en silencio) o cuando el texto llega
 // a este largo, para mantener fragmentos legibles.

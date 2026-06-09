@@ -1,8 +1,8 @@
 'use client'
 
-import { useLiveSession } from '@/features/live/hooks/useLiveSession'
+import { useLiveSession, type TranscriptSegment } from '@/features/live/hooks/useLiveSession'
 import Link from 'next/link'
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import RecordingStatusBar from '@/components/layout/RecordingStatusBar'
 
 function fmtDuration(secs: number) {
@@ -22,6 +22,70 @@ const SPEAKER_STYLES = {
   null:    { color: '#e2e8f0', label: '' },
 }
 
+// Lista de fragmentos memoizada: sólo se re-renderiza cuando cambian los
+// fragmentos o las traducciones, NO en cada tick de la transcripción interina
+// (que dispara muchas actualizaciones por segundo). Esto evita reconciliar
+// cientos de nodos del DOM constantemente, que es lo que congelaba la pestaña.
+const TranscriptRows = memo(function TranscriptRows({
+  transcript, translations, translationEnabled,
+}: {
+  transcript: TranscriptSegment[]
+  translations: Record<string, string>
+  translationEnabled: boolean
+}) {
+  const lastIdx = transcript.length - 1
+  return (
+    <>
+      {transcript.map((seg, i) => {
+        const sp = SPEAKER_STYLES[seg.speaker ?? 'null'] ?? SPEAKER_STYLES['meeting']
+        const isLast = i === lastIdx
+
+        if (translationEnabled) {
+          const translated = translations[seg.id]
+          const words = seg.text.trim().split(/\s+/).length
+          return (
+            <div key={seg.id}
+              className={`grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md ${isLast ? 'bg-indigo-500/[0.08]' : ''}`}>
+              <div className="flex items-start gap-1.5 min-w-0">
+                <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+                  {fmtDuration(Math.round(seg.start_ms / 1000))}
+                </span>
+                {seg.speaker && (
+                  <span className="text-xs font-semibold flex-shrink-0" style={{ color: sp.color }}>
+                    {sp.label}:
+                  </span>
+                )}
+                <span className="text-sm break-words" style={{ color: sp.color }}>{seg.text}</span>
+              </div>
+              <div className="border-l pl-4 min-w-0" style={{ borderColor: 'var(--color-surface-border)' }}>
+                {translated
+                  ? <span className="text-sm break-words" style={{ color: '#06B6D4' }}>{translated}</span>
+                  : words >= 2
+                    ? <span className="text-xs italic" style={{ color: 'var(--color-text-muted)' }}>Traduciendo…</span>
+                    : <span className="text-sm break-words opacity-50" style={{ color: '#06B6D4' }}>{seg.text}</span>}
+              </div>
+            </div>
+          )
+        }
+
+        return (
+          <div key={seg.id} className={`transcript-line ${isLast ? 'active' : ''}`}>
+            <span className="text-xs mr-1.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+              {fmtDuration(Math.round(seg.start_ms / 1000))}
+            </span>
+            {seg.speaker && (
+              <span className="text-xs font-semibold mr-1.5 flex-shrink-0" style={{ color: sp.color }}>
+                {sp.label}:
+              </span>
+            )}
+            <span className="text-sm break-words min-w-0" style={{ color: sp.color }}>{seg.text}</span>
+          </div>
+        )
+      })}
+    </>
+  )
+})
+
 export default function LivePage() {
   const session = useLiveSession()
   const [customPrompt, setCustomPrompt] = useState('')
@@ -38,6 +102,8 @@ export default function LivePage() {
   const transcriptRef     = useRef<HTMLDivElement>(null)
   const suggestRef        = useRef<HTMLDivElement>(null)
   const atBottomSuggest   = useRef(true)
+  const atBottomTranscript = useRef(true)
+  const scrollRafRef      = useRef<number | null>(null)
 
   useEffect(() => {
     fetch('/api/documents/content')
@@ -57,7 +123,7 @@ export default function LivePage() {
     if (!liveTranslatorEnabled || session.transcript.length === 0) return
     const last = session.transcript[session.transcript.length - 1]
     if (!last || translatingRef.current.has(last.id) || translations[last.id]) return
-    if (last.text.split(' ').length < 3) return  // segmentos muy cortos no se traducen
+    if (last.text.trim().split(/\s+/).length < 2) return  // palabras sueltas no se traducen
     translatingRef.current.add(last.id)
     fetch('/api/audio-tools/translate-segment', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -72,10 +138,16 @@ export default function LivePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.transcript.length, liveTranslatorEnabled])
 
-  // Auto-scroll transcript (incluye los previews en vivo)
+  // Auto-scroll transcript (incluye los previews en vivo). Scroll instantáneo
+  // y coalescido con rAF para no encolar animaciones suaves en cada tick de la
+  // transcripción interina; sólo si el usuario ya estaba al final.
   useEffect(() => {
     const c = transcriptRef.current
-    if (c) c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' })
+    if (!c || !atBottomTranscript.current) return
+    if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current)
+    scrollRafRef.current = requestAnimationFrame(() => {
+      c.scrollTop = c.scrollHeight
+    })
   }, [session.transcript.length, session.interimText, session.meetingInterim])
 
   // Auto-scroll suggestions
@@ -193,7 +265,12 @@ export default function LivePage() {
             </div>
           )}
 
-          <div ref={transcriptRef} className="flex-1 overflow-y-auto p-4 space-y-1.5">
+          <div ref={transcriptRef}
+            onScroll={() => {
+              const c = transcriptRef.current
+              if (c) atBottomTranscript.current = c.scrollHeight - c.scrollTop - c.clientHeight < 80
+            }}
+            className="flex-1 overflow-y-auto p-4 space-y-1.5">
             {session.transcript.length === 0 && !session.interimText && !session.meetingInterim ? (
               <div className="flex flex-col items-center justify-center h-full text-center py-16">
                 <div className="text-4xl mb-3">🎙️</div>
@@ -206,51 +283,11 @@ export default function LivePage() {
                 </p>
               </div>
             ) : (
-              session.transcript.map((seg, i) => {
-                const sp = SPEAKER_STYLES[seg.speaker ?? 'null'] ?? SPEAKER_STYLES['meeting']
-                const isLast = i === session.transcript.length - 1
-
-                // Layout en 2 columnas iguales cuando la traducción está activa
-                if (liveTranslatorEnabled) {
-                  return (
-                    <div key={seg.id}
-                      className={`grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md transition-colors ${isLast ? 'bg-indigo-500/[0.08]' : ''}`}>
-                      <div className="flex items-start gap-1.5 min-w-0">
-                        <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-                          {fmtDuration(Math.round(seg.start_ms / 1000))}
-                        </span>
-                        {seg.speaker && (
-                          <span className="text-xs font-semibold flex-shrink-0" style={{ color: sp.color }}>
-                            {sp.label}:
-                          </span>
-                        )}
-                        <span className="text-sm break-words" style={{ color: sp.color }}>{seg.text}</span>
-                      </div>
-                      <div className="border-l pl-4 min-w-0" style={{ borderColor: 'var(--color-surface-border)' }}>
-                        {translations[seg.id]
-                          ? <span className="text-sm break-words" style={{ color: '#06B6D4' }}>{translations[seg.id]}</span>
-                          : <span className="text-xs italic" style={{ color: 'var(--color-text-muted)' }}>Traduciendo…</span>}
-                      </div>
-                    </div>
-                  )
-                }
-
-                return (
-                  <div key={seg.id}
-                    className={`transcript-line ${isLast ? 'active' : ''}`}>
-                    <span className="text-xs mr-1.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-                      {fmtDuration(Math.round(seg.start_ms / 1000))}
-                    </span>
-                    {seg.speaker && (
-                      <span className="text-xs font-semibold mr-1.5 flex-shrink-0"
-                        style={{ color: sp.color }}>
-                        {sp.label}:
-                      </span>
-                    )}
-                    <span className="text-sm break-words min-w-0" style={{ color: sp.color }}>{seg.text}</span>
-                  </div>
-                )
-              })
+              <TranscriptRows
+                transcript={session.transcript}
+                translations={translations}
+                translationEnabled={liveTranslatorEnabled}
+              />
             )}
 
             {/* Preview en tiempo real del audio de la reunión (blanco) */}
