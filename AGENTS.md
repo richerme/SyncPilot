@@ -150,17 +150,22 @@ Los skills viven en `.codex/skills/` (stubs) y referencian la implementacion com
 2. Implementar paso a paso
 ```
 
-### Flujo 4: Deploy a Produccion (Coolify)
+### Flujo 4: Deploy a Produccion (GitHub Actions → Coolify)
 
 ```
-1. Crear repo privado en GitHub
-2. Vincular GitHub App de Coolify (automatico via API)
-3. Crear app en Coolify con Dockerfile
+1. Crear repo privado en GitHub y push
+   → GitHub Actions construye la imagen Docker y la publica en GHCR
+     (.github/workflows/deploy.yml viene con el template)
+2. Crear base de datos PostgreSQL en Coolify
+3. Crear app en Coolify tipo "Docker Image" (apunta a ghcr.io/owner/repo:latest)
 4. Configurar variables de entorno (DATABASE_URL, AUTH_SECRET, etc.)
-5. Crear base de datos PostgreSQL en Coolify
-6. Ejecutar migraciones (prisma migrate deploy)
+5. Configurar secrets del repo (COOLIFY_URL, COOLIFY_DEPLOY_TOKEN, COOLIFY_APP_UUID)
+6. Primer deploy: Coolify hace docker pull (las migraciones corren al arrancar)
 7. Verificar healthcheck y funcionamiento
 ```
+
+> **REGLA DE ORO**: el VPS NUNCA construye imagenes. El build corre en GitHub
+> Actions; el VPS solo descarga la imagen terminada (segundos, CPU minima).
 
 ---
 
@@ -351,33 +356,45 @@ npm run dev                # Iniciar Next.js
 
 ---
 
-## Deploy en Coolify
+## Deploy en Coolify (builds en GitHub Actions)
+
+**El VPS NUNCA construye imagenes Docker.** El template incluye
+`.github/workflows/deploy.yml`: cada push a `main` construye la imagen en los
+runners de GitHub, la publica en GHCR y dispara el deploy; Coolify solo hace
+`docker pull`. Detalle completo en el skill `coolify-deployer`.
 
 ### Prerequisitos (1 vez por VPS)
 
-1. **GitHub App en Coolify**: Panel → Sources → Add → GitHub App → Register Now → All repositories → Install
-2. **Variables de entorno** en el sistema:
+1. **GHCR login en el VPS**: `docker login ghcr.io -u USUARIO_GITHUB` con un PAT
+   de scope `read:packages` (las imagenes de repos privados son privadas)
+2. **Token deploy-only en Coolify**: Keys & Tokens → API tokens → permiso SOLO
+   `deploy` (es el que se guarda como secret en los repos; NUNCA el token admin)
+3. **Variables de entorno** en `.env` del agente o en el sistema:
    - `GITHUB_TOKEN` (PAT con scope `repo`)
    - `COOLIFY_URL` (URL del panel Coolify)
-   - `COOLIFY_TOKEN` (API token de Coolify)
+   - `COOLIFY_TOKEN` (API token admin de Coolify — solo para el setup)
 
 ### Flujo de Deploy
 
-1. **Crear repo privado** en GitHub (via API o `gh` CLI)
-2. **Vincular GitHub App** de Coolify al repo
-3. **Crear app** en Coolify: `POST /api/v1/applications/private-github-app`
-4. **Crear PostgreSQL** en Coolify para la app
-5. **Configurar env vars** via API de Coolify:
+1. **Crear repo privado** en GitHub (`gh repo create --private --source=. --push`)
+   → la Action construye la primera imagen sola; monitorear con `gh run watch`
+2. **Crear PostgreSQL** en Coolify para la app
+3. **Crear app** en Coolify: `POST /api/v1/applications/dockerimage` con
+   `docker_registry_image_name: ghcr.io/owner/repo` (minusculas) y tag `latest`
+4. **Configurar env vars** via API de Coolify:
    - `DATABASE_URL` (connection string de la BD creada)
    - `AUTH_SECRET` (generado con `npx auth secret`)
    - `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` (si usa Google OAuth)
    - `NEXT_PUBLIC_SITE_URL` (dominio de la app)
-6. **Deploy**: Coolify detecta el Dockerfile y construye automaticamente
-7. **Verificar**: Healthcheck + funcionalidad via URL publica temporal
-8. **Configurar dominio**: Asignar dominio final en Coolify
+5. **Configurar dominio**: Asignar FQDN en Coolify
+6. **Configurar secrets del repo**: `gh secret set` de `COOLIFY_URL`,
+   `COOLIFY_DEPLOY_TOKEN` (deploy-only) y `COOLIFY_APP_UUID`
+7. **Primer deploy**: `GET /api/v1/deploy?uuid=APP_UUID` (es un pull, ~60s)
+8. **Verificar**: Healthcheck + funcionalidad en el dominio
 
 > **Nota critica API Coolify:**
-> - Endpoint para repos privados: `POST /api/v1/applications/private-github-app` (NO `/applications`)
+> - Apps por imagen: `POST /api/v1/applications/dockerimage` (requiere `server_uuid`)
+> - NUNCA `build_pack: dockerfile` ni `private-github-app` — eso construye en el VPS
 > - Los campos PATCH deben ir en requests separados
 > - Para network alias: `PATCH {"custom_network_aliases": "nombre-alias"}`
 

@@ -372,15 +372,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
 ---
 
-## Deploy (Coolify)
+## Deploy (GitHub Actions → Coolify)
 
-El agente despliega automaticamente a tu VPS:
+El agente despliega automaticamente a tu VPS. El build de la imagen Docker corre
+en GitHub Actions (NUNCA en el VPS — el VPS solo hace `docker pull`):
 
-1. **Crear repo** privado en GitHub
+1. **Crear repo** privado en GitHub y push → GitHub Actions construye la imagen en GHCR
 2. **Crear PostgreSQL** en Coolify
-3. **Crear app** con Dockerfile
+3. **Crear app** tipo Docker Image (apunta a `ghcr.io/owner/repo:latest`)
 4. **Configurar env vars**: `DATABASE_URL`, `AUTH_SECRET`, `NEXT_PUBLIC_SITE_URL`
-5. **Deploy**: Coolify detecta el Dockerfile y construye automaticamente
+5. **Configurar secrets del repo** y disparar el primer deploy (Coolify solo descarga la imagen)
 
 ---
 
