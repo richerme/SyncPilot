@@ -31,6 +31,12 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   const uploadDir = process.env.UPLOAD_DIR ?? path.join(process.cwd(), 'uploads')
   const filePath = path.join(uploadDir, storagePath)
 
+  // Contencion anti path-traversal: la ruta resuelta debe quedar dentro de uploadDir.
+  const root = path.resolve(uploadDir)
+  if (path.resolve(filePath) !== root && !path.resolve(filePath).startsWith(root + path.sep)) {
+    return new NextResponse('Prohibido', { status: 403 })
+  }
+
   let stats
   try {
     stats = await stat(filePath)

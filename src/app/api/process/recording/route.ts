@@ -5,14 +5,17 @@ import { chatCompletion, transcribe } from '@/lib/openrouter'
 import { z } from 'zod'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { exec } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { mkdir, unlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 
 export const maxDuration = 300
 
-const execAsync = promisify(exec)
+// execFile (NO exec): los argumentos van directo a ffmpeg sin pasar por un shell,
+// asi un videoPath con metacaracteres se trata como nombre de archivo literal.
+// Nunca usar exec()/shell con rutas derivadas de datos del usuario (RCE).
+const execFileAsync = promisify(execFile)
 
 const RequestSchema = z.object({
   recording_id: z.string(),
@@ -26,9 +29,12 @@ async function extractAudioChunks(videoPath: string, tmpDir: string): Promise<st
   const chunkDuration = 30
   const outputPattern = path.join(tmpDir, 'chunk-%03d.webm')
 
-  await execAsync(
-    `ffmpeg -i "${videoPath}" -vn -acodec libopus -ar 16000 -ac 1 -f segment -segment_time ${chunkDuration} "${outputPattern}" -y`
-  )
+  await execFileAsync('ffmpeg', [
+    '-i', videoPath,
+    '-vn', '-acodec', 'libopus', '-ar', '16000', '-ac', '1',
+    '-f', 'segment', '-segment_time', String(chunkDuration),
+    outputPattern, '-y',
+  ])
 
   const chunks: string[] = []
   let i = 0

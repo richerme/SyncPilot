@@ -5,9 +5,17 @@ import { z } from 'zod'
 import { unlink } from 'node:fs/promises'
 import path from 'node:path'
 
+// storagePath se usa en operaciones de archivo y (antes) en un comando: restringir
+// a una ruta relativa segura evita inyeccion de comandos y path traversal.
+const SAFE_STORAGE_PATH = /^[A-Za-z0-9_.\-/]+$/
+const storagePathSchema = z.string()
+  .max(255)
+  .regex(SAFE_STORAGE_PATH, 'storagePath invalido')
+  .refine(s => !s.split('/').includes('..') && !s.startsWith('/'), 'storagePath invalido')
+
 const PatchSchema = z.object({
   status:       z.enum(['uploading', 'processing', 'ready', 'error']).optional(),
-  storagePath:  z.string().optional(),
+  storagePath:  storagePathSchema.optional(),
   fileSizeBytes: z.number().optional(),
   durationSecs: z.number().optional(),
   isPublic:     z.boolean().optional(),
