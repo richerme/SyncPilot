@@ -1,0 +1,78 @@
+# ============================================================
+# Build & Deploy — GitHub Actions → GHCR → Coolify
+#
+# REGLA DE ORO: el VPS NUNCA construye imagenes Docker.
+# El build (npm install + next build) corre aqui, en los
+# runners de GitHub. El VPS solo hace `docker pull` (segundos).
+#
+# Secrets requeridos en el repo (los configura el skill
+# coolify-deployer; hasta entonces el paso de deploy se salta
+# solo y el push solo publica la imagen):
+#   COOLIFY_URL           https://panel-coolify.tudominio.com
+#   COOLIFY_DEPLOY_TOKEN  API token de Coolify con permiso SOLO "deploy"
+#   COOLIFY_APP_UUID      UUID de la app en Coolify
+# ============================================================
+
+name: Build & Deploy (GHCR → Coolify)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_DEPLOY_TOKEN: ${{ secrets.COOLIFY_DEPLOY_TOKEN }}
+      COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GHCR exige nombres de imagen en minusculas
+      - name: Nombre de imagen (lowercase)
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login a GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build y push de la imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Build-time env: NEXT_PUBLIC_* reales (no secretos) desde repo Variables.
+          build-args: |
+            NEXT_PUBLIC_SITE_URL=${{ vars.NEXT_PUBLIC_SITE_URL }}
+
+      # Solo corre cuando los 3 secrets ya estan configurados.
+      # En el primer push (antes de crear la app en Coolify) se salta.
+      - name: Disparar deploy en Coolify
+        if: env.COOLIFY_URL != '' && env.COOLIFY_DEPLOY_TOKEN != '' && env.COOLIFY_APP_UUID != ''
+        run: |
+          curl --fail -sS \
+            "$COOLIFY_URL/api/v1/deploy?uuid=$COOLIFY_APP_UUID" \
+            -H "Authorization: Bearer $COOLIFY_DEPLOY_TOKEN"

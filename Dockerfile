@@ -18,6 +18,10 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# Build-time env (Coolify la inyectaba; en GitHub Actions llega como build-arg).
+# NEXT_PUBLIC_SITE_URL se incrusta en el bundle, debe ser real.
+ARG NEXT_PUBLIC_SITE_URL
+ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
 RUN npx prisma generate
 RUN NODE_ENV=production npm run build
 
