@@ -74,5 +74,5 @@ jobs:
         if: env.COOLIFY_URL != '' && env.COOLIFY_DEPLOY_TOKEN != '' && env.COOLIFY_APP_UUID != ''
         run: |
           curl --fail -sS \
-            "$COOLIFY_URL/api/v1/deploy?uuid=$COOLIFY_APP_UUID" \
+            "$COOLIFY_URL/api/v1/deploy?uuid=$COOLIFY_APP_UUID&force=true" \
             -H "Authorization: Bearer $COOLIFY_DEPLOY_TOKEN"
