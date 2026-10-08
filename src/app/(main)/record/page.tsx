@@ -140,7 +140,8 @@ export default function RecordPage() {
         {isUploading && (
           <div className="space-y-2">
             <div className="flex justify-between text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-              <span>Subiendo video...</span><span>{progress}%</span>
+              {/* El video se fue subiendo durante la grabación; al final solo falta el último pedazo y prepararlo para reproducir. */}
+              <span>{progress >= 100 ? 'Preparando el video…' : 'Subiendo lo último del video…'}</span><span>{progress}%</span>
             </div>
             <div className="upload-progress">
               <div className="upload-progress-bar" style={{ width: `${progress}%` }} />

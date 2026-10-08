@@ -2,8 +2,9 @@ import { NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
-import { unlink } from 'node:fs/promises'
+import { rm, unlink } from 'node:fs/promises'
 import path from 'node:path'
+import { recordingDir } from '@/features/recording/services/storage'
 
 // storagePath se usa en operaciones de archivo y (antes) en un comando: restringir
 // a una ruta relativa segura evita inyeccion de comandos y path traversal.
@@ -59,10 +60,12 @@ export async function DELETE(_request: Request, { params }: RouteParams) {
   })
   if (!recording) return NextResponse.json({ error: 'No encontrado' }, { status: 404 })
 
+  // Toda la carpeta de la grabación: el video final y lo que haya quedado del
+  // proceso (pedazos sin cerrar, original guardado al re-empaquetar).
+  await rm(recordingDir(session.user.id, id), { recursive: true, force: true }).catch(() => {})
   if (recording.storagePath) {
     const uploadDir = process.env.UPLOAD_DIR ?? '/uploads'
-    const filePath = path.join(uploadDir, recording.storagePath)
-    await unlink(filePath).catch(() => {})
+    await unlink(path.join(uploadDir, recording.storagePath)).catch(() => {})
   }
 
   await prisma.recording.delete({ where: { id } })

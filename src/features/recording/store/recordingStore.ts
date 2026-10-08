@@ -1,6 +1,7 @@
 'use client'
 
 import { create } from 'zustand'
+import { createChunkUploader, type ChunkUploader } from '../services/chunkUploader'
 
 export type RecordingStatus =
   | 'idle' | 'requesting-permissions' | 'recording' | 'paused' | 'uploading' | 'done' | 'error'
@@ -29,7 +30,7 @@ interface RecordingActions {
 
 interface MediaRefs {
   mediaRecorder: MediaRecorder | null
-  chunks: Blob[]
+  uploader: ChunkUploader | null
   mimeType: string
   displayStream: MediaStream | null
   micStream: MediaStream | null
@@ -42,7 +43,7 @@ interface MediaRefs {
 }
 
 const refs: MediaRefs = {
-  mediaRecorder: null, chunks: [], mimeType: 'video/webm',
+  mediaRecorder: null, uploader: null, mimeType: 'video/webm',
   displayStream: null, micStream: null, webcamStream: null,
   audioContext: null, analyser: null,
   timerInterval: null, animationFrame: null, storedRecordingId: null,
@@ -61,47 +62,31 @@ function stopAllStreams() {
   refs.animationFrame = refs.timerInterval = null
 }
 
-const CHUNK_SIZE = 4 * 1024 * 1024 // 4 MB
+// Códec: H.264 primero porque Chrome/Edge lo codifican con la tarjeta de video
+// (VP9, el anterior, se codifica por software y era lo que más CPU consumía en
+// reuniones largas). VP8 queda de respaldo: también es mucho más ligero que VP9.
+const VIDEO_TYPES = [
+  'video/webm;codecs=h264,opus',
+  'video/webm;codecs=vp8,opus',
+  'video/webm;codecs=vp9,opus',
+  'video/webm',
+]
+// Pantalla compartida de reunión: 15 fps y 2.5 Mbps se ven nítidos y cuestan
+// la mitad que 30 fps / 5 Mbps (menos CPU, menos red y archivos más chicos).
+const FRAME_RATE = 15
+const VIDEO_BITRATE = 2_500_000
+const TIMESLICE_MS = 5000
 
-async function uploadChunked(
-  blob: Blob,
-  recordingId: string,
-  onProgress: (pct: number, uploaded: number, total: number) => void,
-  onError: (msg: string) => void,
-  onSuccess: () => void,
-) {
-  const total = blob.size
-  const totalChunks = Math.ceil(total / CHUNK_SIZE)
-  let uploaded = 0
-
-  for (let i = 0; i < totalChunks; i++) {
-    const start = i * CHUNK_SIZE
-    const end = Math.min(start + CHUNK_SIZE, total)
-    const chunk = blob.slice(start, end)
-
-    const form = new FormData()
-    form.append('chunk', chunk)
-    form.append('chunkIndex', String(i))
-    form.append('totalChunks', String(totalChunks))
-    form.append('mimeType', refs.mimeType)
-
-    try {
-      const res = await fetch(`/api/recordings/${recordingId}/upload`, { method: 'POST', body: form })
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        onError(data.error ?? 'Error al subir el video')
-        return
-      }
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Error de red')
-      return
-    }
-
-    uploaded += (end - start)
-    onProgress(Math.round((uploaded / total) * 100), uploaded, total)
+async function completeRecording(recordingId: string, durationSecs: number) {
+  const res = await fetch(`/api/recordings/${recordingId}/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ durationSecs }),
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error ?? 'No se pudo terminar la grabación')
   }
-
-  onSuccess()
 }
 
 const INITIAL: RecordingState = {
@@ -131,7 +116,7 @@ export const useRecordingStore = create<RecordingState & RecordingActions>((set,
 
       // 2. Captura de pantalla
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: 1920, height: 1080, frameRate: 30 } as MediaTrackConstraints,
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: FRAME_RATE, max: FRAME_RATE } } as MediaTrackConstraints,
         audio: includeSystemAudio,
       })
       refs.displayStream = displayStream
@@ -194,40 +179,44 @@ export const useRecordingStore = create<RecordingState & RecordingActions>((set,
 
       destination.stream.getAudioTracks().forEach(t => combinedStream.addTrack(t))
 
-      // 6. MediaRecorder
-      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-        ? 'video/webm;codecs=vp9,opus' : 'video/webm'
-      refs.mimeType = mimeType
+      // 6. MediaRecorder: cada pedazo se sube en cuanto sale (ver chunkUploader)
+      const mimeType = VIDEO_TYPES.find(t => MediaRecorder.isTypeSupported(t)) ?? ''
+      refs.mimeType = mimeType || 'video/webm'
 
       const mediaRecorder = new MediaRecorder(combinedStream, {
-        mimeType, videoBitsPerSecond: 5_000_000, audioBitsPerSecond: 128_000,
+        ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: VIDEO_BITRATE, audioBitsPerSecond: 128_000,
       })
       refs.mediaRecorder = mediaRecorder
-      refs.chunks = []
+      const uploader = createChunkUploader(recordingId, (uploaded, recorded) => {
+        // Durante la grabación solo se actualiza el contador; la barra se usa al final.
+        if (get().status === 'uploading') {
+          set({ uploadedBytes: uploaded, totalBytes: recorded, progress: recorded ? Math.round((uploaded / recorded) * 100) : 0 })
+        }
+      })
+      refs.uploader = uploader
 
-      mediaRecorder.ondataavailable = e => { if (e.data?.size > 0) refs.chunks.push(e.data) }
+      mediaRecorder.ondataavailable = e => { if (e.data?.size > 0) uploader.push(e.data) }
 
-      mediaRecorder.onstop = () => {
+      mediaRecorder.onstop = async () => {
         const capturedId = refs.storedRecordingId
-        const finalBlob = new Blob(refs.chunks, { type: refs.mimeType })
         stopAllStreams()
-
         if (!capturedId) {
           set({ status: 'error', error: 'No se encontró ID de grabación.' })
           return
         }
-
-        set({ status: 'uploading', totalBytes: finalBlob.size, uploadedBytes: 0, progress: 0 })
-
-        uploadChunked(
-          finalBlob, capturedId,
-          (pct, uploaded, total) => set({ progress: pct, uploadedBytes: uploaded, totalBytes: total }),
-          msg => set({ status: 'error', error: msg }),
-          () => set({ status: 'done', progress: 100 }),
-        )
+        const recorded = uploader.recordedBytes()
+        const uploaded = uploader.uploadedBytes()
+        set({ status: 'uploading', totalBytes: recorded, uploadedBytes: uploaded, progress: recorded ? Math.round((uploaded / recorded) * 100) : 0 })
+        try {
+          await uploader.finish()
+          await completeRecording(capturedId, get().duration)
+          set({ status: 'done', progress: 100 })
+        } catch (err) {
+          set({ status: 'error', error: err instanceof Error ? err.message : 'Error al subir el video' })
+        }
       }
 
-      mediaRecorder.start(5000)
+      mediaRecorder.start(TIMESLICE_MS)
       set({ status: 'recording' })
       refs.timerInterval = setInterval(() => set(s => ({ duration: s.duration + 1 })), 1000)
 
@@ -268,7 +257,7 @@ export const useRecordingStore = create<RecordingState & RecordingActions>((set,
   reset: () => {
     stopAllStreams()
     refs.mediaRecorder = null
-    refs.chunks = []
+    refs.uploader = null
     refs.storedRecordingId = null
     set(INITIAL)
   },
