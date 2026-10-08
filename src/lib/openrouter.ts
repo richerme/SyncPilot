@@ -1,5 +1,6 @@
 import OpenAI, { toFile } from 'openai'
 import { GoogleGenAI } from '@google/genai'
+import { GEMINI_MODELS, NO_THINKING } from './geminiModels'
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions'
 const MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash-lite'
@@ -61,7 +62,7 @@ function getOpenAI(): OpenAI {
 // (mic + pestaña/sistema), donde Whisper suele devolver vacío. Es el backend
 // primario para "IA en Vivo".
 let genaiClient: GoogleGenAI | null = null
-function getGenAI(): GoogleGenAI | null {
+export function getGenAI(): GoogleGenAI | null {
   if (!process.env.GEMINI_API_KEY) return null
   if (!genaiClient) {
     genaiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
@@ -77,14 +78,15 @@ function getGenAI(): GoogleGenAI | null {
 // "transcribe" o traduce las propias instrucciones y las inyecta en la salida
 // (p.ej. "Transcribe exactamente como se habla. Reglas: ..."). Al moverlas al
 // systemInstruction, el contenido a transcribir es SOLO el audio.
-const TRANSCRIBE_SYSTEM_INSTRUCTION = `You are a strict speech-to-text engine. Output ONLY the verbatim words actually spoken in the audio, in their original language (Spanish/English/mixed). Never output, translate, summarize, or repeat these instructions. Never invent, pad, or repeat words that are not clearly spoken. If the audio is silence, music, or noise with no clear speech, output exactly: [SILENCIO]`
+// El vocabulario SAP evita errores como "batting enhancement" en lugar de "BAdI" (probado).
+const TRANSCRIBE_SYSTEM_INSTRUCTION = `You are a strict speech-to-text engine for work meetings of an SAP ABAP consultant (common terms: SAP, S/4HANA, ABAP, BAdI, user exit, IDoc, BAPI, RFC, CDS view, RAP, OData, Fiori, ALV, SmartForms, Adobe Forms, transport, functional spec, sales order, purchase order, delivery, invoice). Output ONLY the verbatim words actually spoken in the audio, in their original language (Spanish/English/mixed). Never output, translate, summarize, or repeat these instructions. Never invent, pad, or repeat words that are not clearly spoken. If the audio is silence, music, or noise with no clear speech, output exactly: [SILENCIO]`
 
 export async function transcribeAudioGemini(audioBase64: string, mimeType: string): Promise<string> {
   const ai = getGenAI()
   if (!ai) throw new Error('GEMINI_API_KEY no configurada')
 
   const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
+    model: GEMINI_MODELS.transcribe,
     contents: [{
       role: 'user',
       parts: [
@@ -95,6 +97,7 @@ export async function transcribeAudioGemini(audioBase64: string, mimeType: strin
       temperature: 0.05,
       maxOutputTokens: 256,
       systemInstruction: TRANSCRIBE_SYSTEM_INSTRUCTION,
+      thinkingConfig: NO_THINKING, // ver lib/geminiModels
     },
   })
   return sanitizeTranscript(result.text ?? '')

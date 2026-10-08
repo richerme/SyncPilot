@@ -1,6 +1,7 @@
 'use client'
 
-import { useLiveSession, type TranscriptSegment } from '@/features/live/hooks/useLiveSession'
+import { useLiveSession, type CopilotAnswer, type TranscriptSegment } from '@/features/live/hooks/useLiveSession'
+import { COPILOT_NAME } from '@/features/live/copilot/profile'
 import Link from 'next/link'
 import { memo, useEffect, useRef, useState } from 'react'
 import RecordingStatusBar from '@/components/layout/RecordingStatusBar'
@@ -12,8 +13,17 @@ function fmtDuration(secs: number) {
   return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`
 }
 
-const ICONS:  Record<string, string> = { reply: '💬', question: '❓', info: 'ℹ️', warning: '⚠️' }
-const COLORS: Record<string, string> = { reply: '#6366F1', question: '#06B6D4', info: '#10B981', warning: '#F59E0B' }
+// Idioma en el que hablas tú (reconocimiento de voz del navegador). El audio de la
+// reunión se detecta solo; este ajuste es únicamente para tu micrófono.
+const VOICE_LANGS = [
+  { code: 'en-US', label: 'English' },
+  { code: 'es-MX', label: 'Español' },
+] as const
+const VOICE_LANG_KEY = 'syncpilot_voice_lang'
+
+const TRIGGER_LABEL: Record<CopilotAnswer['trigger'], string> = {
+  name: 'Te nombraron', button: 'Responder', typed: 'Tu pregunta',
+}
 
 // Colores de speaker
 const SPEAKER_STYLES = {
@@ -22,103 +32,110 @@ const SPEAKER_STYLES = {
   null:    { color: '#e2e8f0', label: '' },
 }
 
-// Lista de fragmentos memoizada: sólo se re-renderiza cuando cambian los
-// fragmentos o las traducciones, NO en cada tick de la transcripción interina
-// (que dispara muchas actualizaciones por segundo). Esto evita reconciliar
-// cientos de nodos del DOM constantemente, que es lo que congelaba la pestaña.
-const TranscriptRows = memo(function TranscriptRows({
-  transcript, translations, translationEnabled,
+// Cada fila memoizada por separado: al llegar un fragmento nuevo solo se pinta ese
+// (y el anterior, que deja de ser el último). En reuniones de 1-2 h hay cientos de
+// filas y re-pintarlas todas en cada fragmento era lo que pesaba.
+const TranscriptRow = memo(function TranscriptRow({
+  seg, translated, translationEnabled, isLast,
 }: {
-  transcript: TranscriptSegment[]
-  translations: Record<string, string>
+  seg: TranscriptSegment
+  translated: string | undefined
   translationEnabled: boolean
+  isLast: boolean
 }) {
-  const lastIdx = transcript.length - 1
+  const sp = SPEAKER_STYLES[seg.speaker ?? 'null'] ?? SPEAKER_STYLES.meeting
+  const time = (
+    <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
+      {fmtDuration(Math.round(seg.start_ms / 1000))}
+    </span>
+  )
+  const label = seg.speaker && (
+    <span className="text-xs font-semibold flex-shrink-0" style={{ color: sp.color }}>{sp.label}:</span>
+  )
+
+  if (translationEnabled) {
+    const words = seg.text.trim().split(/\s+/).length
+    return (
+      <div className={`grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md ${isLast ? 'bg-indigo-500/[0.08]' : ''}`}>
+        <div className="flex items-start gap-1.5 min-w-0">
+          {time}{label}
+          <span className="text-sm break-words" style={{ color: sp.color }}>{seg.text}</span>
+        </div>
+        <div className="border-l pl-4 min-w-0" style={{ borderColor: 'var(--color-surface-border)' }}>
+          {translated
+            ? <span className="text-sm break-words" style={{ color: '#06B6D4' }}>{translated}</span>
+            : words >= 2
+              ? <span className="text-xs italic" style={{ color: 'var(--color-text-muted)' }}>Traduciendo…</span>
+              : <span className="text-sm break-words opacity-50" style={{ color: '#06B6D4' }}>{seg.text}</span>}
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <>
-      {transcript.map((seg, i) => {
-        const sp = SPEAKER_STYLES[seg.speaker ?? 'null'] ?? SPEAKER_STYLES['meeting']
-        const isLast = i === lastIdx
+    <div className={`transcript-line ${isLast ? 'active' : ''}`}>
+      {time}{label}
+      <span className="text-sm break-words min-w-0" style={{ color: sp.color }}>{seg.text}</span>
+    </div>
+  )
+})
 
-        if (translationEnabled) {
-          const translated = translations[seg.id]
-          const words = seg.text.trim().split(/\s+/).length
-          return (
-            <div key={seg.id}
-              className={`grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md ${isLast ? 'bg-indigo-500/[0.08]' : ''}`}>
-              <div className="flex items-start gap-1.5 min-w-0">
-                <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-                  {fmtDuration(Math.round(seg.start_ms / 1000))}
-                </span>
-                {seg.speaker && (
-                  <span className="text-xs font-semibold flex-shrink-0" style={{ color: sp.color }}>
-                    {sp.label}:
-                  </span>
-                )}
-                <span className="text-sm break-words" style={{ color: sp.color }}>{seg.text}</span>
-              </div>
-              <div className="border-l pl-4 min-w-0" style={{ borderColor: 'var(--color-surface-border)' }}>
-                {translated
-                  ? <span className="text-sm break-words" style={{ color: '#06B6D4' }}>{translated}</span>
-                  : words >= 2
-                    ? <span className="text-xs italic" style={{ color: 'var(--color-text-muted)' }}>Traduciendo…</span>
-                    : <span className="text-sm break-words opacity-50" style={{ color: '#06B6D4' }}>{seg.text}</span>}
-              </div>
-            </div>
-          )
-        }
-
-        return (
-          <div key={seg.id} className={`transcript-line ${isLast ? 'active' : ''}`}>
-            <span className="text-xs mr-1.5 flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-              {fmtDuration(Math.round(seg.start_ms / 1000))}
-            </span>
-            {seg.speaker && (
-              <span className="text-xs font-semibold mr-1.5 flex-shrink-0" style={{ color: sp.color }}>
-                {sp.label}:
-              </span>
-            )}
-            <span className="text-sm break-words min-w-0" style={{ color: sp.color }}>{seg.text}</span>
-          </div>
-        )
-      })}
-    </>
+const AnswerCard = memo(function AnswerCard({ answer }: { answer: CopilotAnswer }) {
+  const [copied, setCopied] = useState(false)
+  const streaming = answer.status === 'streaming'
+  return (
+    <div className="suggestion-card type-reply animate-slide-up space-y-1.5">
+      <p className="text-[11px] line-clamp-2" style={{ color: 'var(--color-text-muted)' }}>
+        {TRIGGER_LABEL[answer.trigger]}{answer.question ? ` · ${answer.question}` : ''}
+      </p>
+      <p className="text-sm text-white leading-relaxed whitespace-pre-wrap"
+        style={answer.status === 'error' ? { color: '#F87171' } : undefined}>
+        {answer.text || (streaming ? 'Thinking…' : '')}
+        {streaming && answer.text && <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle animate-pulse bg-indigo-300" />}
+      </p>
+      {answer.status === 'done' && (
+        <div className="flex justify-end">
+          <button onClick={() => { navigator.clipboard.writeText(answer.text); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+            className="text-xs opacity-60 hover:opacity-100 transition-opacity" style={{ color: '#818CF8' }}>
+            {copied ? 'Copiado ✓' : 'Copiar ↗'}
+          </button>
+        </div>
+      )}
+    </div>
   )
 })
 
 export default function LivePage() {
   const session = useLiveSession()
   const [customPrompt, setCustomPrompt] = useState('')
-  const [isAskingAI,   setIsAskingAI]   = useState(false)
   const [docCount,     setDocCount]     = useState(0)
   const [showDebug,    setShowDebug]    = useState(false)
+  const [voiceLang,    setVoiceLang]    = useState<string>('en-US')
 
-  // Live Translator state (loaded from localStorage)
+  // Traducción en esta misma página (se activa en Voice AI Tools → Live Translator)
   const [liveTranslatorEnabled, setLiveTranslatorEnabled] = useState(false)
   const [liveTranslatorLang, setLiveTranslatorLang]       = useState('es')
   const [translations, setTranslations] = useState<Record<string, string>>({})
   const translatingRef = useRef<Set<string>>(new Set())
 
-  const transcriptRef     = useRef<HTMLDivElement>(null)
-  const suggestRef        = useRef<HTMLDivElement>(null)
-  const atBottomSuggest   = useRef(true)
+  const transcriptRef      = useRef<HTMLDivElement>(null)
+  const answersRef         = useRef<HTMLDivElement>(null)
   const atBottomTranscript = useRef(true)
-  const scrollRafRef      = useRef<number | null>(null)
+  const scrollRafRef       = useRef<number | null>(null)
 
   useEffect(() => {
     fetch('/api/documents/content')
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d?.count > 0) { setDocCount(d.count); session.setDocumentContext(d.context) } })
+      .then(d => { if (d?.count > 0) setDocCount(d.count) })
       .catch(() => {})
-    // Cargar config de Live Translator desde localStorage
     try {
       setLiveTranslatorEnabled(localStorage.getItem('syncpilot_live_translator_enabled') === 'true')
       setLiveTranslatorLang(localStorage.getItem('syncpilot_live_translator_lang') ?? 'es')
+      setVoiceLang(localStorage.getItem(VOICE_LANG_KEY) ?? 'en-US')
     } catch { /* ignore */ }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Traducir nuevos segmentos si Live Translator está activo
+  // Traducir nuevos fragmentos si la traducción en esta página está activa
   useEffect(() => {
     if (!liveTranslatorEnabled || session.transcript.length === 0) return
     const last = session.transcript[session.transcript.length - 1]
@@ -130,54 +147,50 @@ export default function LivePage() {
       body: JSON.stringify({ text: last.text, target_lang: liveTranslatorLang }),
     })
       .then(r => r.ok ? r.json() : null)
-      .then(d => {
-        if (d?.translated) setTranslations(prev => ({ ...prev, [last.id]: d.translated }))
-      })
+      .then(d => { if (d?.translated) setTranslations(prev => ({ ...prev, [last.id]: d.translated })) })
       .catch(() => {})
       .finally(() => { translatingRef.current.delete(last.id) })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.transcript.length, liveTranslatorEnabled])
 
-  // Auto-scroll transcript (incluye los previews en vivo). Scroll instantáneo
-  // y coalescido con rAF para no encolar animaciones suaves en cada tick de la
-  // transcripción interina; sólo si el usuario ya estaba al final.
+  // Auto-scroll del transcript (incluye los previews en vivo), coalescido con rAF
+  // y solo si el usuario ya estaba al final.
   useEffect(() => {
     const c = transcriptRef.current
     if (!c || !atBottomTranscript.current) return
     if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current)
-    scrollRafRef.current = requestAnimationFrame(() => {
-      c.scrollTop = c.scrollHeight
-    })
+    scrollRafRef.current = requestAnimationFrame(() => { c.scrollTop = c.scrollHeight })
   }, [session.transcript.length, session.interimText, session.meetingInterim])
 
-  // Auto-scroll suggestions
+  // La respuesta más nueva siempre a la vista, también mientras se escribe.
+  const lastAnswer = session.answers[session.answers.length - 1]
   useEffect(() => {
-    const c = suggestRef.current
-    if (!c) return
-    setTimeout(() => {
-      if (atBottomSuggest.current || session.suggestions.length <= 3)
-        c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' })
-    }, 100)
-  }, [session.suggestions.length])
+    const c = answersRef.current
+    if (c) c.scrollTop = c.scrollHeight
+  }, [session.answers.length, lastAnswer?.text, session.nameHeard])
 
-  async function handleAskAI() {
-    if (!customPrompt.trim()) { await session.askAI(); return }
-    setIsAskingAI(true)
-    await session.askAI(customPrompt)
+  function chooseVoiceLang(code: string) {
+    setVoiceLang(code)
+    try { localStorage.setItem(VOICE_LANG_KEY, code) } catch { /* ignore */ }
+  }
+
+  async function handleAsk() {
+    const text = customPrompt.trim()
     setCustomPrompt('')
-    setIsAskingAI(false)
+    await session.askCopilot(text || undefined)
   }
 
   const isActive  = session.status === 'active'
   const isIdle    = session.status === 'idle'
   const isDone    = session.status === 'done'
   const isLoading = session.status === 'starting' || session.status === 'ending'
+  const copilotBusy = lastAnswer?.status === 'streaming'
+  const lastIdx = session.transcript.length - 1
 
   return (
     <div className="h-screen flex flex-col overflow-hidden"
       style={{ background: 'var(--color-bg)', color: 'var(--color-text)' }}>
 
-      {/* Recording bar */}
       <RecordingStatusBar />
 
       {/* Header */}
@@ -246,7 +259,6 @@ export default function LivePage() {
             <span>Transcripción en vivo</span>
             <div className="flex items-center gap-3 text-xs" style={{ color: 'var(--color-text-muted)' }}>
               {session.transcript.length > 0 && <span>{session.transcript.length} fragmentos</span>}
-              {/* Leyenda de colores */}
               {isActive && (
                 <div className="flex items-center gap-2">
                   <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-400 inline-block" />Tú</span>
@@ -256,7 +268,6 @@ export default function LivePage() {
             </div>
           </div>
 
-          {/* Sub-cabecera de columnas cuando la traducción está activa */}
           {liveTranslatorEnabled && (
             <div className="grid grid-cols-2 gap-4 px-4 py-1.5 border-b text-xs font-semibold flex-shrink-0"
               style={{ borderColor: 'var(--color-surface-border)', color: 'var(--color-text-muted)' }}>
@@ -283,57 +294,34 @@ export default function LivePage() {
                 </p>
               </div>
             ) : (
-              <TranscriptRows
-                transcript={session.transcript}
-                translations={translations}
-                translationEnabled={liveTranslatorEnabled}
-              />
+              session.transcript.map((seg, i) => (
+                <TranscriptRow key={seg.id} seg={seg} translated={translations[seg.id]}
+                  translationEnabled={liveTranslatorEnabled} isLast={i === lastIdx} />
+              ))
             )}
 
             {/* Preview en tiempo real del audio de la reunión (blanco) */}
             {isActive && session.meetingInterim && (
-              liveTranslatorEnabled ? (
-                <div className="grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md bg-indigo-500/[0.08] opacity-70">
-                  <div className="flex items-start gap-1.5 min-w-0">
-                    <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>•••</span>
-                    <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#e2e8f0' }}>Reunión:</span>
-                    <span className="text-sm italic break-words" style={{ color: '#e2e8f0' }}>{session.meetingInterim}</span>
-                  </div>
-                  <div className="border-l pl-4" style={{ borderColor: 'var(--color-surface-border)' }} />
-                </div>
-              ) : (
-                <div className="transcript-line active opacity-70">
-                  <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
-                  <span className="text-xs font-semibold mr-1.5" style={{ color: '#e2e8f0' }}>Reunión:</span>
-                  <span className="text-sm italic" style={{ color: '#e2e8f0' }}>{session.meetingInterim}</span>
-                </div>
-              )
+              <div className="transcript-line active opacity-70">
+                <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>•••</span>
+                <span className="text-xs font-semibold" style={{ color: '#e2e8f0' }}>Reunión:</span>
+                <span className="text-sm italic break-words min-w-0" style={{ color: '#e2e8f0' }}>{session.meetingInterim}</span>
+              </div>
             )}
 
             {/* Preview en tiempo real de la voz del usuario (azul) */}
             {isActive && session.interimText && (
-              liveTranslatorEnabled ? (
-                <div className="grid grid-cols-2 gap-4 px-2 py-1.5 rounded-md bg-indigo-500/[0.08] opacity-60">
-                  <div className="flex items-start gap-1.5 min-w-0">
-                    <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>•••</span>
-                    <span className="text-xs font-semibold flex-shrink-0" style={{ color: '#818CF8' }}>Tú:</span>
-                    <span className="text-sm italic break-words" style={{ color: '#818CF8' }}>{session.interimText}</span>
-                  </div>
-                  <div className="border-l pl-4" style={{ borderColor: 'var(--color-surface-border)' }} />
-                </div>
-              ) : (
-                <div className="transcript-line active opacity-60">
-                  <span className="text-xs mr-1.5" style={{ color: 'var(--color-text-muted)' }}>•••</span>
-                  <span className="text-xs font-semibold mr-1.5" style={{ color: '#818CF8' }}>Tú:</span>
-                  <span className="text-sm italic" style={{ color: '#818CF8' }}>{session.interimText}</span>
-                </div>
-              )
+              <div className="transcript-line active opacity-60">
+                <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>•••</span>
+                <span className="text-xs font-semibold" style={{ color: '#818CF8' }}>Tú:</span>
+                <span className="text-sm italic break-words min-w-0" style={{ color: '#818CF8' }}>{session.interimText}</span>
+              </div>
             )}
           </div>
         </div>
 
-        {/* Columna Copiloto */}
-        <div className="w-80 flex flex-col" style={{ background: 'var(--color-bg-card)' }}>
+        {/* Columna Copiloto: solo respuestas en inglés cuando hay que contestar */}
+        <div className="w-96 flex flex-col" style={{ background: 'var(--color-bg-card)' }}>
           <div className="flex items-center justify-between px-4 py-2.5 border-b"
             style={{ borderColor: 'var(--color-surface-border)' }}>
             <div className="flex items-center gap-2">
@@ -344,54 +332,45 @@ export default function LivePage() {
                 </svg>
               </div>
               <h2 className="text-sm font-semibold text-white">Copiloto IA</h2>
+              <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold" style={{ background: 'rgb(99 102 241/0.15)', color: '#818CF8' }}>EN</span>
             </div>
-            {session.suggestions.length > 0 && (
-              <button onClick={session.clearSuggestions} className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+            {session.answers.length > 0 && (
+              <button onClick={session.clearAnswers} className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
                 Limpiar
               </button>
             )}
           </div>
 
-          <div ref={suggestRef}
-            onScroll={() => {
-              const c = suggestRef.current
-              if (c) atBottomSuggest.current = c.scrollHeight - c.scrollTop - c.clientHeight < 50
-            }}
-            className="flex-1 overflow-y-auto p-3 space-y-2">
-            {session.suggestions.length === 0
-              ? <p className="text-center py-8 text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                {isActive ? 'Las sugerencias aparecerán automáticamente...' : 'Inicia la sesión para recibir sugerencias'}
+          <div ref={answersRef} className="flex-1 overflow-y-auto p-3 space-y-2">
+            {session.answers.length === 0 && !session.nameHeard && (
+              <p className="text-center py-8 px-4 text-xs leading-relaxed" style={{ color: 'var(--color-text-muted)' }}>
+                {isActive
+                  ? <>Contesto en inglés cuando alguien diga <strong className="text-white">«{COPILOT_NAME}»</strong> o cuando presiones <strong className="text-white">Responder</strong>.</>
+                  : 'Inicia la sesión para usar el Copiloto.'}
               </p>
-              : session.suggestions.map((s, i) => (
-                <div key={s.id ?? i} className={`suggestion-card type-${s.type} animate-slide-up`}>
-                  <div className="flex items-start gap-2">
-                    <span className="text-base flex-shrink-0">{ICONS[s.type] ?? '💡'}</span>
-                    <p className="text-xs text-white leading-relaxed">{s.text}</p>
-                  </div>
-                  <div className="flex justify-end mt-2">
-                    <button onClick={() => navigator.clipboard.writeText(s.text)}
-                      className="text-xs opacity-60 hover:opacity-100 transition-opacity"
-                      style={{ color: COLORS[s.type] ?? '#818CF8' }}>
-                      Copiar ↗
-                    </button>
-                  </div>
-                </div>
-              ))}
+            )}
+            {session.answers.map(a => <AnswerCard key={a.id} answer={a} />)}
+            {session.nameHeard && (
+              <div className="p-3 rounded-lg text-xs flex items-center gap-2 animate-pulse"
+                style={{ background: 'rgb(245 158 11/0.1)', border: '1px solid rgb(245 158 11/0.3)', color: '#FBBF24' }}>
+                🔔 Te nombraron · esperando la pregunta…
+              </div>
+            )}
           </div>
 
           {isActive && (
             <div className="p-3 border-t space-y-2" style={{ borderColor: 'var(--color-surface-border)' }}>
-              <p className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Pregunta algo a la IA</p>
+              <p className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Pregúntale al Copiloto (responde en inglés)</p>
               <div className="flex gap-2">
                 <input type="text" value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleAskAI()}
-                  placeholder="¿Cómo responder a esto?"
+                  onKeyDown={e => e.key === 'Enter' && handleAsk()}
+                  placeholder="¿Cómo respondo a esto?"
                   className="flex-1 text-xs px-3 py-2 rounded-lg bg-transparent border text-white"
                   style={{ borderColor: 'var(--color-surface-border)' }} />
-                <button onClick={handleAskAI} disabled={isAskingAI}
-                  className="px-3 py-2 rounded-lg text-xs font-semibold"
+                <button onClick={handleAsk} disabled={copilotBusy}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-50"
                   style={{ background: 'linear-gradient(135deg, #6366F1, #4F46E5)', color: 'white' }}>
-                  {isAskingAI ? '...' : 'Ask'}
+                  {copilotBusy ? '...' : 'Ask'}
                 </button>
               </div>
             </div>
@@ -412,8 +391,6 @@ export default function LivePage() {
 
         {isIdle && (
           <div className="flex flex-col items-center gap-3 w-full max-w-2xl">
-
-            {/* Modo único: Reunión en Vivo */}
             <div className="w-full p-4 rounded-xl border space-y-2"
               style={{ borderColor: 'rgba(99,102,241,0.3)', background: 'rgba(99,102,241,0.05)' }}>
               <p className="font-semibold text-white flex items-center gap-2">🎧 Reunión en Vivo</p>
@@ -425,12 +402,26 @@ export default function LivePage() {
               </p>
               {docCount > 0 && (
                 <p className="text-xs" style={{ color: '#818CF8' }}>
-                  📄 {docCount} documento{docCount > 1 ? 's' : ''} de contexto cargado{docCount > 1 ? 's' : ''} — el Copiloto los usará para responder.
+                  📄 {docCount} documento{docCount > 1 ? 's' : ''} de contexto — el Copiloto los usará para responder.
                 </p>
               )}
+              <div className="flex items-center gap-2 pt-1">
+                <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>Idioma de tu voz:</span>
+                {VOICE_LANGS.map(l => (
+                  <button key={l.code} onClick={() => chooseVoiceLang(l.code)}
+                    className="text-xs px-2.5 py-1 rounded-lg font-medium transition-all"
+                    style={{
+                      background: voiceLang === l.code ? 'rgba(99,102,241,0.2)' : 'var(--color-surface)',
+                      border: `1px solid ${voiceLang === l.code ? 'rgba(99,102,241,0.4)' : 'var(--color-surface-border)'}`,
+                      color: voiceLang === l.code ? '#818CF8' : 'var(--color-text)',
+                    }}>
+                    {l.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <button onClick={session.startSession} className="btn-primary flex items-center gap-2 px-8 py-3">
+            <button onClick={() => session.startSession(voiceLang)} className="btn-primary flex items-center gap-2 px-8 py-3">
               <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
@@ -450,10 +441,10 @@ export default function LivePage() {
 
         {isActive && (
           <>
-            <button onClick={() => session.askAI()}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all"
+            <button onClick={() => session.askCopilot()} disabled={copilotBusy}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50"
               style={{ background: 'linear-gradient(135deg, rgb(99 102 241/0.2), rgb(168 85 247/0.2))', border: '1px solid rgb(99 102 241/0.4)', color: '#818CF8' }}>
-              🧠 Sugerir respuesta
+              💬 Responder
             </button>
             <button onClick={session.endSession}
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all"
@@ -491,9 +482,7 @@ export default function LivePage() {
             {session.debugLogs.length === 0
               ? <p className="text-slate-500">Sin logs.</p>
               : session.debugLogs.map((log, i) => (
-                <p key={i} className={log.includes('ERROR') ? 'text-red-400' : log.includes('SKIPPED') ? 'text-amber-400' : ''}>
-                  {log}
-                </p>
+                <p key={i} className={log.includes('ERROR') ? 'text-red-400' : ''}>{log}</p>
               ))}
           </div>
         )}
