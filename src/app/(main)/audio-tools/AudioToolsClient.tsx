@@ -15,7 +15,7 @@ const TABS: { id: AudioToolTab; icon: string; label: string; sub: string }[] = [
   { id: 'detector',   icon: '🔍', label: 'Accent Detector',      sub: 'Detecta idioma, acento y región' },
   { id: 'meeting',    icon: '📊', label: 'Meeting Assistant Pro', sub: 'Análisis enriquecido post-reunión' },
   { id: 'noise',      icon: '🎚️', label: 'Noise Cancellation',   sub: 'Cancelación de ruido profesional' },
-  { id: 'live',       icon: '🌐', label: 'Live Translator',       sub: 'Configurar traducción en vivo' },
+  { id: 'live',       icon: '🌐', label: 'Live Translator',       sub: 'Traduce la reunión en vivo' },
 ]
 
 export default function AudioToolsClient({ userId, userName }: { userId: string; userName: string }) {
