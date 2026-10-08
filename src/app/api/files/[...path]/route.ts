@@ -6,11 +6,30 @@ import { createReadStream } from 'node:fs'
 import { Readable } from 'node:stream'
 import path from 'node:path'
 import type { NextRequest } from 'next/server'
-import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 
 type RouteParams = { params: Promise<{ path: string[] }> }
 
 export const dynamic = 'force-dynamic'
+
+const CONTENT_TYPES: Record<string, string> = { '.mp4': 'video/mp4', '.webm': 'video/webm' }
+
+/** "bytes=a-b" | "bytes=a-" | "bytes=-n" → [start, end] dentro del archivo, o null si no se puede servir. */
+function parseRange(header: string, size: number): [number, number] | null {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (!m || (!m[1] && !m[2])) return null
+  let start: number
+  let end: number
+  if (!m[1]) {
+    start = Math.max(0, size - Number(m[2])) // sufijo: los últimos n bytes
+    end = size - 1
+  } else {
+    start = Number(m[1])
+    // Rango abierto: hasta el final. El navegador corta la conexión cuando ya tiene
+    // suficiente (antes se servía de 1 MB en 1 MB: muchos viajes antes de reproducir).
+    end = m[2] ? Math.min(Number(m[2]), size - 1) : size - 1
+  }
+  return start <= end && start < size ? [start, end] : null
+}
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
   const session = await auth()
@@ -44,39 +63,26 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     return new NextResponse('Archivo no encontrado', { status: 404 })
   }
 
-  const range = request.headers.get('range')
   const fileSize = stats.size
+  const headers: Record<string, string> = {
+    'Content-Type':  CONTENT_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream',
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'private, max-age=3600',
+    'Last-Modified': stats.mtime.toUTCString(),
+  }
 
+  const range = request.headers.get('range')
   if (range) {
-    const parts = range.replace(/bytes=/, '').split('-')
-    const start = parseInt(parts[0], 10)
-    const end = parts[1] ? parseInt(parts[1], 10) : Math.min(start + 1024 * 1024 - 1, fileSize - 1)
-    const chunkSize = end - start + 1
-
-    const nodeStream = createReadStream(filePath, { start, end })
-    const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream
-
+    const r = parseRange(range, fileSize)
+    if (!r) return new NextResponse(null, { status: 416, headers: { 'Content-Range': `bytes */${fileSize}` } })
+    const [start, end] = r
+    const webStream = Readable.toWeb(createReadStream(filePath, { start, end })) as unknown as ReadableStream
     return new NextResponse(webStream, {
       status: 206,
-      headers: {
-        'Content-Range':  `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges':  'bytes',
-        'Content-Length': String(chunkSize),
-        'Content-Type':   'video/webm',
-        'Cache-Control':  'private, max-age=3600',
-      },
+      headers: { ...headers, 'Content-Range': `bytes ${start}-${end}/${fileSize}`, 'Content-Length': String(end - start + 1) },
     })
   }
 
-  const nodeStream = createReadStream(filePath)
-  const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream
-
-  return new NextResponse(webStream, {
-    headers: {
-      'Content-Type':   'video/webm',
-      'Content-Length': String(fileSize),
-      'Accept-Ranges':  'bytes',
-      'Cache-Control':  'private, max-age=3600',
-    },
-  })
+  const webStream = Readable.toWeb(createReadStream(filePath)) as unknown as ReadableStream
+  return new NextResponse(webStream, { headers: { ...headers, 'Content-Length': String(fileSize) } })
 }

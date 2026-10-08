@@ -50,8 +50,14 @@ export default function VideoPlayerPage({ slug, initialData }: {
   const { recording, aiSummary, actionItems } = initialData
 
   // ── Fix WebM Infinity duration (Chrome MediaRecorder bug) ──────────────
+  // Las grabaciones re-empaquetadas ya traen duración. Si el archivo no la trae
+  // pero la BD sí, se usa la de la BD: el truco de saltar al final obliga al
+  // navegador a recorrer todo el archivo y era lo que retrasaba el play.
+  const knownDuration = initialData.recording.durationSecs
   const fixInfinityDuration = useCallback((vid: HTMLVideoElement) => {
-    if (vid.duration === Infinity || isNaN(vid.duration)) {
+    if ((vid.duration === Infinity || isNaN(vid.duration)) && knownDuration) {
+      setDuration(knownDuration)
+    } else if (vid.duration === Infinity || isNaN(vid.duration)) {
       vid.currentTime = 1e101
       vid.onseeked = () => {
         vid.onseeked = null
@@ -61,7 +67,7 @@ export default function VideoPlayerPage({ slug, initialData }: {
     } else if (Number.isFinite(vid.duration) && vid.duration > 0) {
       setDuration(Math.floor(vid.duration))
     }
-  }, [])
+  }, [knownDuration])
 
   useEffect(() => {
     const vid = videoRef.current
@@ -206,7 +212,7 @@ export default function VideoPlayerPage({ slug, initialData }: {
             className="rounded-2xl overflow-hidden group flex flex-col justify-center bg-black"
             style={{ aspectRatio: isFullscreen ? 'auto' : '16/9', position: 'relative' }}>
             {recording.videoUrl ? (
-              <video ref={videoRef} src={recording.videoUrl}
+              <video ref={videoRef} src={recording.videoUrl} preload="metadata" playsInline
                 className="w-full h-full object-contain" onClick={togglePlay} style={{ cursor: 'pointer' }} />
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-8 text-center">
