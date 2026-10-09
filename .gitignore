@@ -62,8 +62,28 @@ Thumbs.db
 # Prisma
 prisma/migrations/.migration_lock.toml
 
-# Recursos
+# Recursos y carpetas
 Recursos
+BOS-github
+El Plan de Acción Diario
+Legal Shield
+RAG Estimation Platform
+RAG Estimation Service
+SFlow
+Slides Agénticas
+SyncPilot
+templates
 
 # Uploads locales
 /uploads
+
+# Artefactos de build (se regeneran solos al compilar)
+*.tsbuildinfo
+next-env.d.ts
+public/sw.js
+public/workbox-*.js
+public/swe-worker-*.js
+
+# Herramientas y capturas locales
+.playwright-mcp/
+/*.png
