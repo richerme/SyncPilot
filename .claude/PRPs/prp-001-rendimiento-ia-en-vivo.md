@@ -22,7 +22,7 @@
 | Transcripción | AudioWorklet 16 kHz → cortes en pausas de 0.3 s (máx. 5 s, cortando en el tramo más bajo), sin silencios, WAV binario, entrega en orden, fin de turno local (1.2 s) |
 | Modelos | ver `src/lib/geminiModels.ts`; vocabulario SAP en las instrucciones de transcripción |
 | Copiloto | solo con botón **Responder**, al oír "Rick" (espera fin de la pregunta, máx. 8 s; enfriamiento 15 s) o pregunta escrita; inglés, primera persona, perfil de consultor SAP ABAP (`copilot/profile.ts`); streaming; documentos buscados en el servidor (`lib/docContext.ts`, hasta 12k caracteres relevantes); `.docx` extraídos sin dependencias (`lib/docx.ts`) |
-| Live Translator | `BroadcastChannel` entre pestañas: la reunión de IA en Vivo se traduce en vivo en Voice AI Tools (turno re-traducido mientras se habla, se reutiliza al cerrarlo) |
+| Live Translator | Voice AI Tools → Live Translator es solo configuración (activar + idioma). Si está activa, IA en Vivo se divide en vertical: transcripción a la izquierda, traducción a la derecha (`features/live/hooks/useLiveTranslation.ts`: turno re-traducido mientras se habla, reutilizado al cerrarlo; los cambios de ajuste se aplican al momento por el evento `storage`). Decisión del usuario 8 oct: misma ventana, para practicar el listening leyendo el original y consultar la traducción al lado |
 
 ## Mediciones
 

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { encodeWav, OrderedDelivery, SpeechSegmenter, startMeetingAudioTap, type MeetingAudioTap } from '../audio/meetingAudio'
-import { openLiveChannel, type LiveMessage, type LiveSegmentMessage } from '../broadcast'
 import { COPILOT_NAME, NAME_PATTERN } from '../copilot/profile'
 import { streamAnswer, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
 
@@ -37,7 +36,6 @@ const MEETING_FLUSH_CHARS   = 220
 const NAME_FALLBACK_MS      = 8000
 const NAME_COOLDOWN_MS      = 15000
 const COPILOT_CONTEXT_CHARS = 6000
-const INTERIM_BROADCAST_MS  = 300
 const END_WAIT_MS           = 4000 // al finalizar, espera las últimas transcripciones en camino
 
 type Delivered = { kind: 'text'; text: string } | { kind: 'turnEnd' }
@@ -75,9 +73,6 @@ export function useLiveSession() {
   const nameTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastNameAnswerRef = useRef(0)
   const copilotBusyRef    = useRef(false)
-  const channelRef        = useRef<BroadcastChannel | null>(null)
-  const activeRef         = useRef(false)
-  const lastInterimSentRef = useRef(0)
 
   function addLog(msg: string) {
     const entry = `[${new Date().toLocaleTimeString()}] ${msg}`
@@ -85,27 +80,13 @@ export function useLiveSession() {
     setDebugLogs(prev => [...prev.slice(-49), entry])
   }
 
-  function broadcast(msg: LiveMessage) {
-    try { channelRef.current?.postMessage(msg) } catch { /**/ }
-  }
-
-  // Canal con el Live Translator: si se abre a media sesión, recibe lo que va.
   useEffect(() => {
-    channelRef.current = openLiveChannel(msg => {
-      if (msg.type !== 'hello') return
-      const segments: LiveSegmentMessage[] = transcriptRef.current.slice(-60)
-        .map(s => ({ id: s.id, text: s.text, speaker: s.speaker === 'me' ? 'me' : 'meeting', startMs: s.start_ms }))
-      broadcast({ type: 'snapshot', active: activeRef.current, segments })
-    })
     return () => {
       shouldRestartRef.current = false
-      activeRef.current = false
       recognitionRef.current?.abort()
       stopAllStreams()
       if (timerRef.current)     clearInterval(timerRef.current)
       if (nameTimerRef.current) clearTimeout(nameTimerRef.current)
-      channelRef.current?.close()
-      channelRef.current = null
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -134,7 +115,6 @@ export function useLiveSession() {
     setTranscript(transcriptRef.current)
     wordCountRef.current += text.split(/\s+/).length
     setWordCount(wordCountRef.current)
-    broadcast({ type: 'segment', id: seg.id, text, speaker, startMs })
     saveSegment(text)
   }
 
@@ -191,7 +171,6 @@ export function useLiveSession() {
     const t = meetingBufferRef.current.trim()
     meetingBufferRef.current = ''
     setMeetingInterim('')
-    broadcast({ type: 'interim', speaker: 'meeting', text: '' })
     if (t.length > 1) {
       turnTextRef.current = `${turnTextRef.current} ${t}`.trim()
       addSegment(t, 'meeting')
@@ -208,7 +187,6 @@ export function useLiveSession() {
     if (!d.text) return
     meetingBufferRef.current = `${meetingBufferRef.current} ${d.text}`.trim()
     setMeetingInterim(meetingBufferRef.current)
-    broadcast({ type: 'interim', speaker: 'meeting', text: meetingBufferRef.current })
     addLog(`Reunión: "${d.text.slice(0, 80)}"`)
     if (NAME_PATTERN.test(d.text) && nameArmedRef.current === null && Date.now() - lastNameAnswerRef.current > NAME_COOLDOWN_MS) armName()
     if (meetingBufferRef.current.length >= MEETING_FLUSH_CHARS) flushMeetingBuffer()
@@ -294,11 +272,6 @@ export function useLiveSession() {
         }
       }
       setInterimText(interim)
-      const now = Date.now()
-      if (!interim || now - lastInterimSentRef.current > INTERIM_BROADCAST_MS) {
-        lastInterimSentRef.current = now
-        broadcast({ type: 'interim', speaker: 'me', text: interim })
-      }
     }
 
     rec.onend = () => {
@@ -353,8 +326,6 @@ export function useLiveSession() {
       await launchMeetingCapture()
 
       timerRef.current = setInterval(() => setDuration(d => d + 1), DURATION_TICK_MS)
-      activeRef.current = true
-      broadcast({ type: 'status', active: true })
       setStatus('active')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error al iniciar'
@@ -385,8 +356,6 @@ export function useLiveSession() {
     setInterimText('')
     setMeetingInterim('')
     if (timerRef.current) clearInterval(timerRef.current)
-    activeRef.current = false
-    broadcast({ type: 'status', active: false })
 
     if (meetingIdRef.current) {
       await fetch(`/api/meetings/${meetingIdRef.current}`, {
