@@ -13,7 +13,7 @@ export interface CopilotAnswer {
 /** Pide la respuesta al servidor y la va entregando conforme llega (streaming). */
 export async function streamAnswer(
   meetingId: string,
-  body: { question?: string; transcript: string; trigger: CopilotTrigger },
+  body: { question?: string; live: string; trigger: CopilotTrigger },
   onText: (text: string) => void,
 ): Promise<string> {
   const res = await fetch(`/api/meetings/${meetingId}/answer`, {

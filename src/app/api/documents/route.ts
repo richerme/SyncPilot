@@ -3,8 +3,7 @@ import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { writeFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import { extractTextFromPdf } from '@/lib/openrouter'
-import { extractDocxText } from '@/lib/docx'
+import { DOCUMENT_TYPES, extractDocumentText, uploadDir as getUploadDir, type DocumentExt } from '@/lib/documentText'
 
 export async function GET() {
   const session = await auth()
@@ -29,11 +28,10 @@ export async function POST(request: Request) {
   const file = formData.get('file') as File | null
   if (!file) return NextResponse.json({ error: 'Sin archivo' }, { status: 400 })
 
-  const ext = file.name.split('.').pop()?.toLowerCase() ?? 'txt'
-  const validTypes = ['pdf', 'txt', 'md', 'docx']
-  if (!validTypes.includes(ext)) return NextResponse.json({ error: 'Tipo de archivo no soportado' }, { status: 400 })
+  const ext = (file.name.split('.').pop()?.toLowerCase() ?? 'txt') as DocumentExt
+  if (!DOCUMENT_TYPES.includes(ext)) return NextResponse.json({ error: 'Tipo de archivo no soportado' }, { status: 400 })
 
-  const uploadDir = process.env.UPLOAD_DIR ?? path.join(process.cwd(), 'uploads')
+  const uploadDir = getUploadDir()
   const docDir = path.join(uploadDir, session.user.id, 'documents')
   await mkdir(docDir, { recursive: true })
 
@@ -44,23 +42,14 @@ export async function POST(request: Request) {
   const buffer = Buffer.from(await file.arrayBuffer())
   await writeFile(filePath, buffer)
 
-  // Extraer texto para usarlo como contexto de reunión.
-  // .txt/.md: lectura directa. .docx: word/document.xml. .pdf: Gemini (acepta PDF nativo).
-  let extractedText: string | null = null
-  if (['txt', 'md'].includes(ext)) {
-    extractedText = buffer.toString('utf-8').slice(0, 50000)
-  } else if (ext === 'docx') {
-    extractedText = extractDocxText(buffer).slice(0, 50000) || null
-  } else if (ext === 'pdf') {
-    const text = await extractTextFromPdf(buffer.toString('base64'))
-    extractedText = text ? text.slice(0, 50000) : null
-  }
+  // Texto completo para el contexto de las reuniones (lib/documentText).
+  const extractedText = await extractDocumentText(ext, buffer)
 
   const doc = await prisma.contextDocument.create({
     data: {
       userId:      session.user.id,
       name:        file.name,
-      fileType:    ext as 'pdf' | 'txt' | 'md' | 'docx',
+      fileType:    ext,
       storagePath,
       fileSizeBytes: BigInt(buffer.length),
       extractedText,

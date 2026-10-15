@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
+import { releaseMeetingContext } from '@/lib/meetingContext'
 
 type RouteParams = { params: Promise<{ id: string }> }
 
@@ -10,6 +11,8 @@ const TranscriptSchema = z.object({
   end_ms:   z.number(),
   text:     z.string().min(1),
   language: z.string().default('es'),
+  // 'me' = Rick (micrófono), 'meeting' = los demás; el Copiloto lee la reunión completa con esto.
+  speaker:  z.enum(['me', 'meeting']).optional(),
 })
 
 const PatchSchema = z.object({
@@ -39,6 +42,7 @@ export async function POST(request: Request, { params }: RouteParams) {
       endMs:    parsed.data.end_ms,
       text:     parsed.data.text,
       language: parsed.data.language,
+      speaker:  parsed.data.speaker ?? null,
     },
   })
 
@@ -72,6 +76,9 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       title:       parsed.data?.title ?? meeting.title,
     },
   })
+
+  // Ya no se va a preguntar nada en esta reunión: se borra el caché de sus documentos.
+  await releaseMeetingContext(meetingId)
 
   return NextResponse.json({ success: true })
 }

@@ -1,6 +1,6 @@
 'use client'
 
-import { useLiveSession, type CopilotAnswer, type TranscriptSegment } from '@/features/live/hooks/useLiveSession'
+import { useLiveSession, type CopilotAnswer, type MeetingContextInfo, type TranscriptSegment } from '@/features/live/hooks/useLiveSession'
 import { useLiveTranslation, useTranslatorSettings } from '@/features/live/hooks/useLiveTranslation'
 import { COPILOT_NAME } from '@/features/live/copilot/profile'
 import Link from 'next/link'
@@ -109,6 +109,44 @@ const AnswerCard = memo(function AnswerCard({ answer }: { answer: CopilotAnswer 
   )
 })
 
+// Lo que el Copiloto tiene cargado de esta reunión: documentos completos y de qué trata.
+function MeetingContextCard({ ctx, defaultOpen }: { ctx: MeetingContextInfo; defaultOpen: boolean }) {
+  const [open, setOpen] = useState<boolean | null>(null)
+  const isOpen = open ?? defaultOpen
+  const kchars = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
+  if (ctx.status === 'loading') {
+    return <div className="p-3 rounded-lg text-xs animate-pulse" style={{ background: 'rgb(99 102 241/0.08)', border: '1px solid rgb(99 102 241/0.25)', color: '#A5B4FC' }}>
+      📄 Cargando tus documentos para esta reunión…
+    </div>
+  }
+  if (ctx.status === 'error') {
+    return <div className="p-3 rounded-lg text-xs" style={{ background: 'rgb(245 158 11/0.08)', border: '1px solid rgb(245 158 11/0.3)', color: '#FBBF24' }}>
+      No se pudo preparar el contexto. El Copiloto buscará en tus documentos al responder.
+    </div>
+  }
+  if (!ctx.docs.length) {
+    return <p className="p-3 rounded-lg text-xs" style={{ background: 'var(--color-surface)', color: 'var(--color-text-muted)' }}>
+      Sin documentos activos. Súbelos en <Link href="/documents" className="underline">Documentos</Link> para que el Copiloto los use.
+    </p>
+  }
+  return (
+    <div className="rounded-lg text-xs" style={{ background: 'rgb(99 102 241/0.08)', border: '1px solid rgb(99 102 241/0.25)' }}>
+      <button onClick={() => setOpen(!isOpen)} className="w-full flex items-center justify-between gap-2 p-3 text-left" aria-expanded={isOpen}>
+        <span className="font-semibold" style={{ color: '#A5B4FC' }}>📄 Contexto de la reunión · {ctx.docs.length} doc{ctx.docs.length > 1 ? 's' : ''} completos</span>
+        <span style={{ color: 'var(--color-text-muted)' }}>{isOpen ? '▲' : '▼'}</span>
+      </button>
+      {isOpen && (
+        <div className="px-3 pb-3 space-y-2">
+          <ul className="space-y-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+            {ctx.docs.map(d => <li key={d.name} className="truncate">· {d.name} <span style={{ color: 'var(--color-text-muted)' }}>({kchars(d.chars)} caracteres)</span></li>)}
+          </ul>
+          {ctx.brief && <p className="whitespace-pre-wrap leading-relaxed text-white/90">{ctx.brief}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function LivePage() {
   const session = useLiveSession()
   const [customPrompt, setCustomPrompt] = useState('')
@@ -119,14 +157,19 @@ export default function LivePage() {
   // Traducción a la derecha de la transcripción: solo si está activa en
   // Voice AI Tools → Live Translator (si se cambia allá, se aplica aquí al momento).
   const translator = useTranslatorSettings()
+  // Con el motor en streaming la traducción llega junto con la transcripción; con el de
+  // respaldo (tramos) se traduce aquí el texto ya reconocido.
+  const streamTranslates = session.engineKind === 'stream'
+  const liveText = `${session.meetingInterim} ${session.meetingTentative.replace(/…/g, ' ')}`.replace(/\s+/g, ' ').trim()
   const { translations, interimTranslation } = useLiveTranslation({
-    enabled: translator.enabled, lang: translator.lang,
-    transcript: session.transcript, meetingInterim: session.meetingInterim,
+    enabled: translator.enabled && !streamTranslates, lang: translator.lang,
+    transcript: session.transcript, meetingInterim: liveText,
   })
+  const hasLive = !!(session.meetingInterim || session.meetingTentative)
 
   const answersRef = useRef<HTMLDivElement>(null)
-  const transcriptPane  = useStickToBottom([session.transcript.length, session.interimText, session.meetingInterim])
-  const translationPane = useStickToBottom([session.transcript.length, translations, interimTranslation, session.meetingInterim])
+  const transcriptPane  = useStickToBottom([session.transcript.length, session.interimText, session.meetingInterim, session.meetingTentative])
+  const translationPane = useStickToBottom([session.transcript.length, translations, interimTranslation, session.segmentTranslations, session.liveTranslation, liveText])
 
   useEffect(() => {
     fetch('/api/documents/content')
@@ -244,7 +287,7 @@ export default function LivePage() {
 
           <div ref={transcriptPane.ref} onScroll={transcriptPane.onScroll}
             className="flex-1 overflow-y-auto p-4 space-y-1.5">
-            {session.transcript.length === 0 && !session.interimText && !session.meetingInterim ? (
+            {session.transcript.length === 0 && !session.interimText && !hasLive ? (
               <div className="flex flex-col items-center justify-center h-full text-center py-16">
                 <div className="text-4xl mb-3">🎙️</div>
                 <p className="text-sm font-medium text-white">
@@ -259,12 +302,15 @@ export default function LivePage() {
               session.transcript.map((seg, i) => <TranscriptRow key={seg.id} seg={seg} isLast={i === lastIdx} />)
             )}
 
-            {/* Preview en tiempo real del audio de la reunión (blanco) */}
-            {isActive && session.meetingInterim && (
-              <div className="transcript-line active opacity-70">
+            {/* Lo que se está diciendo en la reunión: lo ya reconocido en blanco; lo que aún puede cambiar, tenue */}
+            {isActive && hasLive && (
+              <div className="transcript-line active">
                 <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>•••</span>
                 <span className="text-xs font-semibold" style={{ color: '#e2e8f0' }}>Reunión:</span>
-                <span className="text-sm italic break-words min-w-0" style={{ color: '#e2e8f0' }}>{session.meetingInterim}</span>
+                <span className="text-sm break-words min-w-0" style={{ color: '#e2e8f0' }}>
+                  {session.meetingInterim}{session.meetingInterim && session.meetingTentative ? ' ' : ''}
+                  <span style={{ opacity: 0.5 }}>{session.meetingTentative}</span>
+                </span>
               </div>
             )}
 
@@ -289,20 +335,24 @@ export default function LivePage() {
             </div>
             <div ref={translationPane.ref} onScroll={translationPane.onScroll}
               className="flex-1 overflow-y-auto p-4 space-y-1.5">
-              {session.transcript.length === 0 && !session.meetingInterim ? (
+              {session.transcript.length === 0 && !hasLive ? (
                 <div className="flex flex-col items-center justify-center h-full text-center py-16">
                   <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Aquí aparecerá la traducción de la reunión.</p>
                 </div>
               ) : (
                 session.transcript.map((seg, i) => (
-                  <TranslationRow key={seg.id} seg={seg} translated={translations[seg.id]} isLast={i === lastIdx} />
+                  <TranslationRow key={seg.id} seg={seg} translated={session.segmentTranslations[seg.id] ?? translations[seg.id]} isLast={i === lastIdx} />
                 ))
               )}
-              {isActive && session.meetingInterim && (
-                <div className="transcript-line active opacity-70">
+              {isActive && hasLive && (
+                <div className="transcript-line active">
                   <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>•••</span>
                   <span className="text-xs font-semibold" style={{ color: '#e2e8f0' }}>Reunión:</span>
-                  <span className="text-sm italic break-words min-w-0" style={{ color: '#67E8F9' }}>{interimTranslation ?? '…'}</span>
+                  <span className="text-sm break-words min-w-0" style={{ color: '#67E8F9' }}>
+                    {streamTranslates
+                      ? <>{session.liveTranslation?.text}{session.liveTranslation?.text && session.liveTranslation?.tentative ? ' ' : ''}<span style={{ opacity: 0.5 }}>{session.liveTranslation?.tentative || (session.liveTranslation?.text ? '' : '…')}</span></>
+                      : (interimTranslation ?? <span style={{ opacity: 0.5 }}>…</span>)}
+                  </span>
                 </div>
               )}
             </div>
@@ -331,6 +381,7 @@ export default function LivePage() {
           </div>
 
           <div ref={answersRef} className="flex-1 overflow-y-auto p-3 space-y-2">
+            {session.meetingContext && <MeetingContextCard ctx={session.meetingContext} defaultOpen={session.answers.length === 0} />}
             {session.answers.length === 0 && !session.nameHeard && (
               <p className="text-center py-8 px-4 text-xs leading-relaxed" style={{ color: 'var(--color-text-muted)' }}>
                 {isActive

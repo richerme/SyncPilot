@@ -1,8 +1,9 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { encodeWav, OrderedDelivery, SpeechSegmenter, startMeetingAudioTap, type MeetingAudioTap } from '../audio/meetingAudio'
 import { COPILOT_NAME, NAME_PATTERN } from '../copilot/profile'
+import { startChunkedEngine } from '../engines/chunkedEngine'
+import type { EngineCallbacks, EngineKind, LivePreview, MeetingEngine } from '../engines/types'
 import { streamAnswer, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
 
 export type { CopilotAnswer }
@@ -17,6 +18,15 @@ export interface TranscriptSegment {
 
 export type LiveStatus = 'idle' | 'starting' | 'active' | 'ending' | 'done' | 'error'
 
+/** Contexto de la reunión armado con los documentos activos (ver lib/meetingContext). */
+export interface MeetingContextInfo {
+  status: 'loading' | 'ready' | 'error'
+  docs: { name: string; chars: number }[]
+  brief: string
+  terms: string[]
+  cached: boolean
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SpeechRecognitionCtor = new () => any
 
@@ -28,17 +38,11 @@ declare global {
 }
 
 const DURATION_TICK_MS      = 1000
-// El turno de la reunión se vuelca al historial al terminar de hablar (pausa de
-// 1.2 s, la detecta meetingAudio) o al llegar a este largo, para fragmentos legibles.
-const MEETING_FLUSH_CHARS   = 220
 // Cuando dicen tu nombre, el Copiloto espera a que terminen la pregunta (fin de
 // turno); si siguen hablando, contesta a los 8 s con lo que lleven.
 const NAME_FALLBACK_MS      = 8000
 const NAME_COOLDOWN_MS      = 15000
-const COPILOT_CONTEXT_CHARS = 6000
-const END_WAIT_MS           = 4000 // al finalizar, espera las últimas transcripciones en camino
-
-type Delivered = { kind: 'text'; text: string } | { kind: 'turnEnd' }
+const EMPTY_PREVIEW: LivePreview = { text: '', tentative: '' }
 
 export function useLiveSession() {
   const [status,         setStatus]         = useState<LiveStatus>('idle')
@@ -50,7 +54,13 @@ export function useLiveSession() {
   const [error,          setError]          = useState<string | null>(null)
   const [isListening,    setIsListening]    = useState(false)
   const [interimText,    setInterimText]    = useState('')      // voz del usuario (azul)
-  const [meetingInterim, setMeetingInterim] = useState('')      // audio de reunión (blanco)
+  const [meetingInterim, setMeetingInterim] = useState('')      // audio de reunión (blanco): ya reconocido
+  const [meetingTentative, setMeetingTentative] = useState('')  // lo que aún puede cambiar o tramos en camino
+  const [engineKind,     setEngineKind]     = useState<EngineKind | null>(null)
+  // Traducción que llega junto con la transcripción (motor stream); en chunked la hace useLiveTranslation.
+  const [segmentTranslations, setSegmentTranslations] = useState<Record<string, string>>({})
+  const [liveTranslation, setLiveTranslation] = useState<LivePreview | null>(null)
+  const [meetingContext, setMeetingContext] = useState<MeetingContextInfo | null>(null)
   const [nameHeard,      setNameHeard]      = useState(false)   // te nombraron; esperando la pregunta
   const [debugLogs,      setDebugLogs]      = useState<string[]>([])
   const [audioTracksOk,  setAudioTracksOk]  = useState(false)
@@ -64,10 +74,9 @@ export function useLiveSession() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef    = useRef<any>(null)
   const displayStreamRef  = useRef<MediaStream | null>(null)   // pestaña/pantalla (getDisplayMedia)
-  const tapRef            = useRef<MeetingAudioTap | null>(null)
-  const deliveryRef       = useRef<OrderedDelivery<Delivered> | null>(null)
-  const inFlightRef       = useRef(0)
+  const engineRef         = useRef<MeetingEngine | null>(null)
   const meetingBufferRef  = useRef<string>('')                 // texto del turno aún sin volcar
+  const unsavedRef        = useRef(new Map<string, TranscriptSegment>()) // fragmentos que aún no confirma el servidor
   const turnTextRef       = useRef<string>('')                 // todo lo dicho en el turno actual
   const nameArmedRef      = useRef<number | null>(null)
   const nameTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -92,40 +101,61 @@ export function useLiveSession() {
   }, [])
 
   function stopAllStreams() {
-    tapRef.current?.stop()
-    tapRef.current = null
+    void engineRef.current?.stop()
+    engineRef.current = null
     displayStreamRef.current?.getTracks().forEach(t => t.stop())
     displayStreamRef.current = null
   }
 
-  async function saveSegment(text: string) {
+  async function saveSegment(seg: TranscriptSegment) {
     if (!meetingIdRef.current) return
+    unsavedRef.current.set(seg.id, seg)
     const now = Date.now() - sessionStartRef.current
-    await fetch(`/api/meetings/${meetingIdRef.current}`, {
+    const res = await fetch(`/api/meetings/${meetingIdRef.current}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ start_ms: Math.max(0, now - 2000), end_ms: now, text, language: 'es' }),
-    }).catch(() => {})
+      body: JSON.stringify({ start_ms: Math.max(0, now - 2000), end_ms: now, text: seg.text, language: 'es', speaker: seg.speaker ?? 'meeting' }),
+    }).catch(() => null)
+    if (res?.ok) unsavedRef.current.delete(seg.id)
   }
 
-  function addSegment(text: string, speaker: 'me' | 'meeting') {
+  function addSegment(text: string, speaker: 'me' | 'meeting', translation?: string) {
     const startMs = Date.now() - sessionStartRef.current
     const seg: TranscriptSegment = { id: crypto.randomUUID(), text, start_ms: startMs, end_ms: startMs + 500, speaker }
+    if (translation) setSegmentTranslations(prev => ({ ...prev, [seg.id]: translation }))
     transcriptRef.current = [...transcriptRef.current, seg]
     setTranscript(transcriptRef.current)
     wordCountRef.current += text.split(/\s+/).length
     setWordCount(wordCountRef.current)
-    saveSegment(text)
+    void saveSegment(seg)
   }
 
   // ─────────────────────────────────────────────────────────
   // Copiloto: solo contesta cuando hay que contestar (botón, tu nombre o tu pregunta escrita)
   // ─────────────────────────────────────────────────────────
-  function conversationForCopilot(): string {
-    const lines = transcriptRef.current.slice(-60)
-      .map(s => `${s.speaker === 'me' ? COPILOT_NAME : 'Meeting'}: ${s.text}`)
-    if (meetingBufferRef.current.trim()) lines.push(`Meeting: ${meetingBufferRef.current.trim()}`)
-    return lines.join('\n').slice(-COPILOT_CONTEXT_CHARS)
+  // El servidor lee toda la reunión guardada; aquí solo va lo que aún no confirma y el turno en curso.
+  function liveForCopilot(): string {
+    const mmss = (ms: number) => `${Math.floor(ms / 60000).toString().padStart(2, '0')}:${Math.floor((ms % 60000) / 1000).toString().padStart(2, '0')}`
+    const lines = [...unsavedRef.current.values()]
+      .sort((a, b) => a.start_ms - b.start_ms)
+      .map(s => `[${mmss(s.start_ms)}] ${s.speaker === 'me' ? COPILOT_NAME : 'Meeting'}: ${s.text}`)
+    if (meetingBufferRef.current.trim()) lines.push(`[${mmss(Date.now() - sessionStartRef.current)}] Meeting: ${meetingBufferRef.current.trim()}`)
+    return lines.join('\n').slice(-20000)
+  }
+
+  async function loadMeetingContext(meetingId: string) {
+    setMeetingContext({ status: 'loading', docs: [], brief: '', terms: [], cached: false })
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/context`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+      if (meetingIdRef.current !== meetingId) return
+      setMeetingContext({ status: 'ready', docs: data.docs ?? [], brief: data.brief ?? '', terms: data.terms ?? [], cached: !!data.cached })
+      addLog(`Contexto: ${data.docs?.length ?? 0} documentos${data.cached ? ' en caché' : ''}`)
+    } catch (err) {
+      addLog(`Contexto: ${err instanceof Error ? err.message : String(err)}`)
+      if (meetingIdRef.current === meetingId) setMeetingContext(prev => prev && { ...prev, status: 'error' })
+    }
   }
 
   async function runCopilot(trigger: CopilotTrigger, question?: string) {
@@ -136,7 +166,7 @@ export function useLiveSession() {
     const update = (patch: Partial<CopilotAnswer>) => setAnswers(prev => prev.map(a => (a.id === id ? { ...a, ...patch } : a)))
     setAnswers(prev => [...prev, { id, trigger, question: question?.trim() || null, text: '', status: 'streaming' }])
     try {
-      const text = await streamAnswer(meetingIdRef.current, { question, transcript: conversationForCopilot(), trigger }, t => update({ text: t }))
+      const text = await streamAnswer(meetingIdRef.current, { question, live: liveForCopilot(), trigger }, t => update({ text: t }))
       update({ text: text || 'No answer was generated.', status: 'done' })
     } catch (err) {
       addLog(`Copiloto: ${err instanceof Error ? err.message : String(err)}`)
@@ -165,49 +195,28 @@ export function useLiveSession() {
   }
 
   // ─────────────────────────────────────────────────────────
-  // Audio de la reunión → transcripción (en orden) → preview + historial
+  // Audio de la reunión → motor de transcripción → vista previa + historial
   // ─────────────────────────────────────────────────────────
-  function flushMeetingBuffer() {
-    const t = meetingBufferRef.current.trim()
-    meetingBufferRef.current = ''
-    setMeetingInterim('')
-    if (t.length > 1) {
-      turnTextRef.current = `${turnTextRef.current} ${t}`.trim()
-      addSegment(t, 'meeting')
-    }
-  }
-
-  function handleDelivered(d: Delivered) {
-    if (d.kind === 'turnEnd') {
-      flushMeetingBuffer()
+  const engineCallbacks: EngineCallbacks = {
+    preview(p) {
+      meetingBufferRef.current = `${p.text} ${p.tentative.replace(/…/g, ' ')}`.replace(/\s+/g, ' ').trim()
+      setMeetingInterim(p.text)
+      setMeetingTentative(p.tentative)
+    },
+    translationPreview(p) { setLiveTranslation(p.text || p.tentative ? p : null) },
+    commit(text, translation) {
+      turnTextRef.current = `${turnTextRef.current} ${text}`.trim()
+      addSegment(text, 'meeting', translation)
+    },
+    turnEnd() {
       if (nameArmedRef.current !== null) fireName()
       turnTextRef.current = ''
-      return
-    }
-    if (!d.text) return
-    meetingBufferRef.current = `${meetingBufferRef.current} ${d.text}`.trim()
-    setMeetingInterim(meetingBufferRef.current)
-    addLog(`Reunión: "${d.text.slice(0, 80)}"`)
-    if (NAME_PATTERN.test(d.text) && nameArmedRef.current === null && Date.now() - lastNameAnswerRef.current > NAME_COOLDOWN_MS) armName()
-    if (meetingBufferRef.current.length >= MEETING_FLUSH_CHARS) flushMeetingBuffer()
-  }
-
-  async function transcribeChunk(pcm: Float32Array) {
-    const delivery = deliveryRef.current
-    if (!delivery) return
-    const seq = delivery.ticket()
-    let text = ''
-    inFlightRef.current++
-    try {
-      const res = await fetch('/api/live/transcribe', { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: encodeWav(pcm) })
-      if (res.ok) text = String((await res.json()).text ?? '').trim()
-      else addLog(`API ${res.status}`)
-    } catch (err) {
-      addLog(`Fetch error: ${err instanceof Error ? err.message : String(err)}`)
-    } finally {
-      inFlightRef.current--
-    }
-    delivery.resolve(seq, { kind: 'text', text: text.length > 1 ? text : '' })
+    },
+    heard(text) {
+      addLog(`Reunión: "${text.slice(0, 80)}"`)
+      if (NAME_PATTERN.test(text) && nameArmedRef.current === null && Date.now() - lastNameAnswerRef.current > NAME_COOLDOWN_MS) armName()
+    },
+    log: addLog,
   }
 
   async function launchMeetingCapture() {
@@ -232,13 +241,8 @@ export function useLiveSession() {
       }
     })
 
-    const delivery = new OrderedDelivery<Delivered>(handleDelivered)
-    deliveryRef.current = delivery
-    const segmenter = new SpeechSegmenter(
-      pcm => { void transcribeChunk(pcm) },
-      () => delivery.resolve(delivery.ticket(), { kind: 'turnEnd' }),
-    )
-    tapRef.current = await startMeetingAudioTap(new MediaStream(audioTracks), segmenter)
+    engineRef.current = await startChunkedEngine(new MediaStream(audioTracks), engineCallbacks)
+    setEngineKind(engineRef.current.kind)
     setAudioTracksOk(true)
     setIsListening(true)
   }
@@ -301,7 +305,12 @@ export function useLiveSession() {
     setDuration(0)
     setAudioTracksOk(false)
     setMeetingInterim('')
+    setMeetingTentative('')
+    setSegmentTranslations({})
+    setLiveTranslation(null)
+    setMeetingContext(null)
     setNameHeard(false)
+    unsavedRef.current.clear()
     transcriptRef.current    = []
     wordCountRef.current     = 0
     meetingBufferRef.current = ''
@@ -318,6 +327,8 @@ export function useLiveSession() {
 
       meetingIdRef.current = data.meeting_id
       setMeetingId(data.meeting_id)
+      // Documentos completos + de qué trata la reunión, sin detener el inicio.
+      void loadMeetingContext(data.meeting_id)
       sessionStartRef.current  = Date.now()
       shouldRestartRef.current = true
 
@@ -345,16 +356,18 @@ export function useLiveSession() {
 
     try { recognitionRef.current?.abort() } catch { /**/ }
     recognitionRef.current = null
-    stopAllStreams() // manda el último tramo de audio pendiente
-    const deadline = Date.now() + END_WAIT_MS
-    while (inFlightRef.current > 0 && Date.now() < deadline) await new Promise(r => setTimeout(r, 100))
-    flushMeetingBuffer()
+    // El motor manda el último tramo, espera las respuestas en camino y vuelca el turno.
+    await engineRef.current?.stop()
+    engineRef.current = null
+    displayStreamRef.current?.getTracks().forEach(t => t.stop())
+    displayStreamRef.current = null
     if (nameTimerRef.current) clearTimeout(nameTimerRef.current)
     nameArmedRef.current = null
     setNameHeard(false)
     setIsListening(false)
     setInterimText('')
-    setMeetingInterim('')
+    engineCallbacks.preview(EMPTY_PREVIEW)
+    setLiveTranslation(null)
     if (timerRef.current) clearInterval(timerRef.current)
 
     if (meetingIdRef.current) {
@@ -386,6 +399,7 @@ export function useLiveSession() {
   const resetSession = useCallback(() => {
     setStatus('idle'); setMeetingId(null); setTranscript([]); setAnswers([])
     setWordCount(0); setDuration(0); setError(null); setInterimText(''); setMeetingInterim('')
+    setMeetingTentative(''); setSegmentTranslations({}); setLiveTranslation(null); setEngineKind(null); setMeetingContext(null)
     setAudioTracksOk(false); setNameHeard(false)
     transcriptRef.current    = []
     wordCountRef.current     = 0
@@ -395,7 +409,8 @@ export function useLiveSession() {
 
   return {
     status, meetingId, transcript, answers, wordCount, duration, nameHeard,
-    error, isListening, interimText, meetingInterim, audioTracksOk, debugLogs,
+    error, isListening, interimText, meetingInterim, meetingTentative, audioTracksOk, debugLogs,
+    engineKind, segmentTranslations, liveTranslation, meetingContext,
     startSession, endSession, askCopilot, clearAnswers, resetSession,
   }
 }

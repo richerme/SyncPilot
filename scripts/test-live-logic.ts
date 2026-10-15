@@ -6,6 +6,8 @@ import path from 'node:path'
 import { SpeechSegmenter, OrderedDelivery, encodeWav } from '../src/features/live/audio/meetingAudio'
 import { extractDocxText } from '../src/lib/docx'
 import { NAME_PATTERN } from '../src/features/live/copilot/profile'
+import { createChunkedTranscriber } from '../src/features/live/engines/chunkedEngine'
+import type { EngineCallbacks } from '../src/features/live/engines/types'
 
 let failures = 0
 const check = (ok: boolean, label: string) => { console.log(`${ok ? '✓' : '✗'} ${label}`); if (!ok) failures++ }
@@ -21,7 +23,7 @@ for (let i = 0; i + 1600 <= pcm.length; i += 1600) seg.push(pcm.slice(i, i + 160
 seg.flush()
 console.log('  eventos:', events.join(' | '))
 check(chunks.length >= 2, `corta en pausas (${chunks.length} tramos)`)
-check(chunks.every(s => s <= 5.1), 'ningún tramo pasa de 5 s')
+check(chunks.every(s => s <= 3.1), 'ningún tramo pasa de 3 s')
 check(events.filter(e => e === 'turnEnd').length === 2, 'detecta 2 fines de turno (tras cada frase)')
 const firstTurnEnd = events.indexOf('turnEnd')
 check(firstTurnEnd > 0 && events.slice(0, firstTurnEnd).every(e => e.startsWith('chunk')), 'el primer fin de turno llega después de los tramos de la frase 1')
@@ -60,5 +62,59 @@ const text = extractDocxText(zip('word/document.xml', Buffer.from(xml)))
 check(text === 'Especificación funcional\n\nBAdI ME_PROCESS_PO_CUST & tabla ZMM_LOG', `extrae el texto del .docx (${JSON.stringify(text)})`)
 check(extractDocxText(Buffer.from('no es un zip')) === '', 'un archivo dañado no truena')
 
-console.log(failures ? `\n${failures} fallaron` : '\nTodo pasó')
-process.exit(failures ? 1 : 0)
+// 6) Con ruido de fondo (como una llamada real): sigue encontrando pausas y fines de turno
+function withNoise(src: Float32Array, noiseRms: number, seed = 7): Float32Array {
+  const amp = noiseRms * Math.sqrt(3)
+  let x = seed
+  return Float32Array.from(src, v => { x = (x * 1103515245 + 12345) % 2147483648; return v + ((x / 2147483648) * 2 - 1) * amp })
+}
+function segment(audio: Float32Array) {
+  const ev: string[] = [], lens: number[] = []
+  const sg = new SpeechSegmenter(p => { lens.push(p.length / 16000); ev.push(`chunk ${(p.length / 16000).toFixed(1)}s`) }, () => ev.push('turnEnd'))
+  for (let i = 0; i + 1600 <= audio.length; i += 1600) sg.push(audio.slice(i, i + 1600))
+  sg.flush()
+  return { ev, lens }
+}
+const ruidoso = segment(withNoise(pcm, 0.02))
+console.log('  con ruido:', ruidoso.ev.join(' | '))
+check(ruidoso.lens.length >= 2 && ruidoso.lens.every(l => l <= 3.1), `con ruido corta en pausas, tramos ≤ 3 s (${ruidoso.lens.length})`)
+check(ruidoso.ev.filter(e => e === 'turnEnd').length === 2, 'con ruido detecta los 2 fines de turno')
+const soloRuido = segment(withNoise(new Float32Array(16000 * 10), 0.02))
+check(soloRuido.ev.length === 0, 'solo ruido de fondo: no manda nada ni marca fin de turno')
+
+// 7) Motor por tramos: un tramo lento ya no detiene a los demás
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+async function engineTests() {
+  const previews: { text: string; tentative: string }[] = []
+  const commits: string[] = []
+  let turns = 0, calls = 0
+  const cb: EngineCallbacks = { preview: p => previews.push(p), commit: t => commits.push(t), turnEnd: () => turns++, heard: () => {}, log: () => {} }
+  const core = createChunkedTranscriber(cb, async () => { const n = calls++; await sleep(n === 0 ? 600 : 40); return `t${n}` })
+  for (let i = 0; i + 1600 <= pcm.length; i += 1600) core.sink.push(pcm.slice(i, i + 1600))
+  await sleep(200)
+  const mid = previews[previews.length - 1]
+  check(calls >= 2 && mid.text === '' && /t1/.test(mid.tentative), `el tramo 2 se ve mientras el 1 sigue en camino (vista: "${mid.tentative}")`)
+  await sleep(700)
+  await core.stop()
+  check(commits.join(' ').startsWith('t0 t1'), `el historial queda en orden (${commits.join(' | ')})`)
+  check(turns === 2, `avisa los 2 fines de turno (${turns})`)
+
+  const commits2: string[] = []
+  let calls2 = 0
+  const core2 = createChunkedTranscriber({ ...cb, commit: t => commits2.push(t), preview: () => {}, turnEnd: () => {} }, (_w, signal) => {
+    const n = calls2++
+    if (n === 0) return new Promise((_r, rej) => signal.addEventListener('abort', () => rej(new Error('abort'))))
+    return sleep(30).then(() => `t${n}`)
+  })
+  const t0 = Date.now()
+  for (let i = 0; i + 1600 <= pcm.length; i += 1600) core2.sink.push(pcm.slice(i, i + 1600))
+  while (!commits2.length && Date.now() - t0 < 7000) await sleep(100)
+  const waited = Date.now() - t0
+  await core2.stop()
+  check(commits2.length > 0 && waited < 7000 && !/t0/.test(commits2.join(' ')), `un tramo sin respuesta se suelta a los 5 s y los demás siguen (${(waited / 1000).toFixed(1)} s: ${commits2.join(' | ')})`)
+}
+
+engineTests().then(() => {
+  console.log(failures ? `\n${failures} fallaron` : '\nTodo pasó')
+  process.exit(failures ? 1 : 0)
+})

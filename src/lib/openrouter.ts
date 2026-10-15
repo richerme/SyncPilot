@@ -149,16 +149,17 @@ export async function extractTextFromPdf(base64: string): Promise<string> {
     return ''
   }
   try {
+    // 65k tokens de salida (~250k caracteres): con 8,192 los PDF largos se cortaban (PRP-003).
     const result = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: GEMINI_MODELS.copilot,
       contents: [{
         role: 'user',
         parts: [
           { inlineData: { mimeType: 'application/pdf', data: base64 } },
-          { text: 'Extrae TODO el texto de este documento tal cual, sin resumir ni añadir comentarios. Conserva el orden y los saltos de párrafo.' },
+          { text: 'Extrae TODO el texto de este documento tal cual, sin resumir ni añadir comentarios. Conserva el orden y los saltos de párrafo. Las tablas, fila por fila con " | " entre columnas.' },
         ],
       }],
-      config: { temperature: 0, maxOutputTokens: 8192 },
+      config: { temperature: 0, maxOutputTokens: 65536, thinkingConfig: NO_THINKING },
     })
     return (result.text ?? '').trim()
   } catch (err) {

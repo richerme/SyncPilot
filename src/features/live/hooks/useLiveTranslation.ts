@@ -7,7 +7,7 @@ import type { TranscriptSegment } from './useLiveSession'
 export const TRANSLATOR_ENABLED_KEY = 'syncpilot_live_translator_enabled'
 export const TRANSLATOR_LANG_KEY    = 'syncpilot_live_translator_lang'
 
-const INTERIM_DEBOUNCE_MS = 250
+const INTERIM_DEBOUNCE_MS = 120
 const CATCH_UP_SEGMENTS   = 8 // al activar o cambiar de idioma a media sesión, solo se traducen los últimos
 
 async function translate(text: string, lang: string): Promise<string | null> {
