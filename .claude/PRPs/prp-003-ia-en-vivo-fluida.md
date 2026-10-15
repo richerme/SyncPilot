@@ -1,6 +1,6 @@
 # PRP-003: IA en Vivo fluida — transcripción palabra por palabra, traducción a la par y Copiloto con todo el contexto
 
-> **Estado**: APROBADO (2026-10-15) — en implementación
+> **Estado**: IMPLEMENTADO (2026-10-15) — fases 1-4 en producción; falta la prueba del usuario en una reunión real
 > **Pedido del usuario**: la transcripción se pausa y luego muestra de golpe lo último; la traducción se retrasa porque espera a la transcripción. Quiere que las palabras aparezcan fluidas conforme avanza el audio y que la traducción vaya a la par. Los Documentos deben estar en el contexto de cada reunión (de qué trata y para encontrar respuestas), y el Copiloto (al oír "Rick" o con el botón) debe tener todos los Documentos y todo lo que se ha hablado en la reunión.
 
 ## Diagnóstico (15 oct)
@@ -105,7 +105,7 @@ Soniox además acepta **contexto** (hasta 8,000 tokens: términos y texto) y sep
 | 2 | Hecha (15 oct) | `engines/streamEngine.ts` + `POST /api/live/stt-token` + insignia «⚡ Palabra por palabra». Prueba real con Soniox (`scripts/test-soniox-stream.ts`): palabras tentativas **~0.55 s** detrás del audio (mediana), finales ~1.6 s en inglés; la traducción de cada frase llega ~0.4 s después de que termina. Contexto con dominio, frases típicas, términos y `translation_terms`: «BAdI» e «IDoc» salen bien (sin eso: «BADI», «Aidoc»). En español con traducción al español no hay tokens de traducción → se muestra el original. El nombre se detecta desde las tentativas. |
 | 3 | Hecha (15 oct) | `lib/documentText.ts` (texto completo, tope 1M; PDF con 65k tokens de salida), `lib/meetingContext.ts` (caché de Gemini por reunión con los documentos completos y las instrucciones, 3 h renovable; resumen y términos; relee documentos cortados con los topes viejos), `POST /api/meetings/:id/context`, panel «Contexto de la reunión». |
 | 4 | Hecha (15 oct) | `/answer` lee TODA la reunión de la BD (con `[mm:ss]` y quién habla) + lo no guardado (`live`), caché de documentos (o documentos completos en el prompt; fragmentos solo si pasan de ~600k tokens), resumen. Los fragmentos se guardan con `speaker`. El caché se borra al terminar la reunión. |
-| 5 | Pendiente | Despliegue y prueba en reunión real. |
+| 5 | Desplegado (15 oct) | Deploys 51af73f y 7773c9d en verde; falta la prueba del usuario en una reunión real (insignia «⚡ Palabra por palabra»). |
 
 ## Aprendizajes (Auto-Blindaje)
 
