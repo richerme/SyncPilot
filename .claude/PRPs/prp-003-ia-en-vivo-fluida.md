@@ -102,12 +102,19 @@ Soniox además acepta **contexto** (hasta 8,000 tokens: términos y texto) y sep
 | Fase | Estado | Qué quedó |
 |---|---|---|
 | 1 | Hecha (15 oct) | `engines/chunkedEngine.ts` (motor por tramos con vista previa fuera de orden, tope de 5 s por tramo), pausa relativa al ruido en `SpeechSegmenter` (tramos ≤ 3 s), traducción del turno con 120 ms de espera. Pruebas: `npx tsx scripts/test-live-logic.ts <wav>` (22 ✓). |
-| 2 | Código listo (commit local 947bb14, sin desplegar) | `engines/streamEngine.ts` (WebSocket con llave temporal en los protocolos `['soniox-api-key', llave]`, audio guardado mientras abre, `StreamTurns` arma el turno y cierra en `<end>`, traducción tardía se agrega al último pedazo, 1 reconexión y luego motor por tramos), `POST /api/live/stt-token`, insignia «⚡ Palabra por palabra». Prueba real: `npx tsx --env-file=.env --env-file=.env.local scripts/test-soniox-stream.ts <wav>`. 15 oct: llave y conexión OK, pero Soniox responde **402 organization_balance_exhausted** (cuenta sin saldo). |
+| 2 | Hecha (15 oct) | `engines/streamEngine.ts` + `POST /api/live/stt-token` + insignia «⚡ Palabra por palabra». Prueba real con Soniox (`scripts/test-soniox-stream.ts`): palabras tentativas **~0.55 s** detrás del audio (mediana), finales ~1.6 s en inglés; la traducción de cada frase llega ~0.4 s después de que termina. Contexto con dominio, frases típicas, términos y `translation_terms`: «BAdI» e «IDoc» salen bien (sin eso: «BADI», «Aidoc»). En español con traducción al español no hay tokens de traducción → se muestra el original. El nombre se detecta desde las tentativas. |
 | 3 | Hecha (15 oct) | `lib/documentText.ts` (texto completo, tope 1M; PDF con 65k tokens de salida), `lib/meetingContext.ts` (caché de Gemini por reunión con los documentos completos y las instrucciones, 3 h renovable; resumen y términos; relee documentos cortados con los topes viejos), `POST /api/meetings/:id/context`, panel «Contexto de la reunión». |
 | 4 | Hecha (15 oct) | `/answer` lee TODA la reunión de la BD (con `[mm:ss]` y quién habla) + lo no guardado (`live`), caché de documentos (o documentos completos en el prompt; fragmentos solo si pasan de ~600k tokens), resumen. Los fragmentos se guardan con `speaker`. El caché se borra al terminar la reunión. |
 | 5 | Pendiente | Despliegue y prueba en reunión real. |
 
 ## Aprendizajes (Auto-Blindaje)
+
+### 2026-10-15: Soniox necesita contexto de dominio, no solo la lista de términos
+- **Error**: solo con `context.terms` escribió «BADI» y «Aidoc».
+- **Fix**: `context.general` (dominio y tema), `context.text` (frases típicas) y `translation_terms` para que la traducción no toque los términos SAP → «BAdI» e «IDoc» correctos en original y traducción.
+
+### 2026-10-15: con traducción one_way, lo dicho en el idioma destino no trae traducción
+- **Fix**: `enable_language_identification` y, si el idioma del turno es el destino, la traducción es el original (si no, la columna se quedaba en «Traduciendo…»). En español continuo los tokens finales tardan ~5 s: el nombre se detecta desde las tentativas.
 
 ### 2026-10-15: Soniox autentica en los protocolos del WebSocket y cobra por adelantado
 - La llave temporal se crea con `POST /v1/auth/temporary-api-key` (`usage_type: transcribe_websocket`) y el navegador la manda como `new WebSocket(url, ['soniox-api-key', llave])`; `api_key` dentro del mensaje de inicio está en desuso (se rechaza desde el 15 ene 2027).

@@ -4,7 +4,7 @@
 // protocolos), manda el audio a tiempo real en tramos de 100 ms y mide cuánto tardan en verse
 // las palabras (tentativas y finales) y la traducción. Nunca imprime las llaves.
 import { readFileSync } from 'node:fs'
-import { StreamTurns, type SonioxMessage } from '../src/features/live/engines/streamEngine'
+import { StreamTurns, sonioxContext, type SonioxMessage } from '../src/features/live/engines/streamEngine'
 import { SAP_TERMS } from '../src/features/live/copilot/profile'
 
 const key = process.env.SONIOX_API_KEY
@@ -28,7 +28,7 @@ async function main() {
     preview: () => {}, translationPreview: () => {}, heard: () => {}, log: () => {}, turnEnd: () => {},
     commit: (t, tr) => commits.push(`${t}\n    → ${tr ?? '(sin traducción)'}`),
     amendTranslation: t => { commits[commits.length - 1] += t },
-  })
+  }, translateTo)
   const ws = new WebSocket('wss://stt-rt.soniox.com/transcribe-websocket', ['soniox-api-key', tmp.api_key])
   ws.binaryType = 'arraybuffer'
   const t0 = { v: 0 }
@@ -57,8 +57,8 @@ async function main() {
   ws.onopen = async () => {
     ws.send(JSON.stringify({
       model: 'stt-rt-v5', audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
-      language_hints: ['en', 'es'], enable_endpoint_detection: true, max_endpoint_delay_ms: 1500,
-      context: { terms: SAP_TERMS }, translation: { type: 'one_way', target_language: translateTo },
+      language_hints: ['en', 'es'], enable_language_identification: true, enable_endpoint_detection: true, max_endpoint_delay_ms: 1500,
+      context: process.env.CONTEXTO === 'rico' ? sonioxContext([]) : { terms: SAP_TERMS }, translation: { type: 'one_way', target_language: translateTo },
     }))
     t0.v = Date.now()
     for (let i = 0; i < pcm.length; i += FRAME) {

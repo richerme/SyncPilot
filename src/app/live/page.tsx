@@ -4,7 +4,7 @@ import { useLiveSession, type CopilotAnswer, type MeetingContextInfo, type Trans
 import { useLiveTranslation, useTranslatorSettings } from '@/features/live/hooks/useLiveTranslation'
 import { COPILOT_NAME } from '@/features/live/copilot/profile'
 import Link from 'next/link'
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import RecordingStatusBar from '@/components/layout/RecordingStatusBar'
 
 function fmtDuration(secs: number) {
@@ -161,9 +161,11 @@ export default function LivePage() {
   // respaldo (tramos) se traduce aquí el texto ya reconocido.
   const streamTranslates = session.engineKind === 'stream'
   const liveText = `${session.meetingInterim} ${session.meetingTentative.replace(/…/g, ' ')}`.replace(/\s+/g, ' ').trim()
+  // Tu voz (micrófono) no pasa por el streaming: esa se sigue traduciendo aquí.
+  const toTranslate = useMemo(() => streamTranslates ? session.transcript.filter(seg => seg.speaker === 'me') : session.transcript, [streamTranslates, session.transcript])
   const { translations, interimTranslation } = useLiveTranslation({
-    enabled: translator.enabled && !streamTranslates, lang: translator.lang,
-    transcript: session.transcript, meetingInterim: liveText,
+    enabled: translator.enabled, lang: translator.lang,
+    transcript: toTranslate, meetingInterim: streamTranslates ? '' : liveText,
   })
   const hasLive = !!(session.meetingInterim || session.meetingTentative)
 

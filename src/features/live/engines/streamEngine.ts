@@ -6,7 +6,7 @@
 // La llave es temporal (la crea /api/live/stt-token); si algo falla, el hook vuelve al
 // motor por tramos.
 import { startMeetingAudioTap } from '../audio/meetingAudio'
-import { SAP_TERMS } from '../copilot/profile'
+import { NAME_PATTERN, SAP_TERMS } from '../copilot/profile'
 import type { EngineCallbacks, MeetingEngine } from './types'
 
 const WS_URL             = 'wss://stt-rt.soniox.com/transcribe-websocket'
@@ -17,7 +17,7 @@ const TERMS_WAIT_MS      = 4000  // espera los términos de los documentos (el a
 const END_WAIT_MS        = 4000
 const MAX_TERMS          = 300
 
-export interface SonioxToken { text: string; is_final?: boolean; translation_status?: string }
+export interface SonioxToken { text: string; is_final?: boolean; translation_status?: string; language?: string }
 export interface SonioxMessage { tokens?: SonioxToken[]; finished?: boolean; error_code?: number; error_type?: string; error_message?: string }
 
 /**
@@ -28,7 +28,13 @@ export class StreamTurns {
   private orig = ''
   private trans = ''
   private committedSinceTrans = false // ya se cerró el pedazo y aún puede llegar su traducción
-  constructor(private cb: EngineCallbacks) {}
+  private lang = ''                   // idioma de lo último que se dijo (identificación de Soniox)
+  /** `target`: idioma de la traducción. Lo que ya se dice en ese idioma no trae traducción: se muestra tal cual. */
+  constructor(private cb: EngineCallbacks, private target: string | null = null) {}
+
+  private sameLanguage(): boolean {
+    return !!this.target && !!this.lang && this.lang.toLowerCase().startsWith(this.target.toLowerCase())
+  }
 
   handle(msg: SonioxMessage) {
     let liveOrig = '', liveTrans = '', heard = '', ends = 0
@@ -36,6 +42,7 @@ export class StreamTurns {
       if (t.text === '<end>') { this.commit(); ends++; continue }
       if (t.text === '<fin>') continue
       const isTrans = t.translation_status === 'translation'
+      if (!isTrans && t.language) this.lang = t.language
       if (!t.is_final) { if (isTrans) liveTrans += t.text; else liveOrig += t.text; continue }
       if (!isTrans) { this.orig += t.text; heard += t.text; this.committedSinceTrans = false; continue }
       // Traducción final que llega cuando el original ya pasó al historial: es de ese pedazo.
@@ -43,9 +50,15 @@ export class StreamTurns {
       else this.trans += t.text
     }
     if (heard.trim()) this.cb.heard(heard.trim())
+    // Las palabras finales pueden tardar segundos en una frase larga: el nombre se detecta
+    // desde las tentativas para que el Copiloto quede listo al terminar la pregunta.
+    else if (NAME_PATTERN.test(liveOrig)) this.cb.heard(liveOrig.trim())
     if (!ends && this.orig.length >= MAX_SEGMENT_CHARS && /[.?!]\s*$/.test(this.orig)) this.commit()
     this.cb.preview({ text: this.orig.trim(), tentative: liveOrig.trim() })
-    this.cb.translationPreview?.({ text: this.trans.trim(), tentative: liveTrans.trim() })
+    const same = this.sameLanguage() && !this.trans.trim() && !liveTrans.trim()
+    this.cb.translationPreview?.(same
+      ? { text: this.orig.trim(), tentative: liveOrig.trim() }
+      : { text: this.trans.trim(), tentative: liveTrans.trim() })
     for (let i = 0; i < ends; i++) this.cb.turnEnd()
   }
 
@@ -54,11 +67,31 @@ export class StreamTurns {
     this.orig = ''
     this.trans = ''
     if (o.length > 1) {
-      this.cb.commit(o, t || undefined)
+      this.cb.commit(o, t || (this.sameLanguage() ? o : undefined))
       this.committedSinceTrans = true
     }
   }
 }
+
+/**
+ * Contexto para Soniox (máx. 8,000 tokens): de qué trata la conversación, vocabulario SAP +
+ * términos de los documentos, y términos que la traducción debe dejar tal cual.
+ */
+export function sonioxContext(docTerms: string[]) {
+  const terms = [...new Set([...SAP_TERMS, ...docTerms])].slice(0, MAX_TERMS)
+  return {
+    general: [
+      { key: 'domain', value: 'SAP ERP consulting' },
+      { key: 'topic', value: 'Work meeting of an SAP ABAP consultant (Rick) with clients and functional consultants about requirements, enhancements, interfaces and testing' },
+    ],
+    text: 'Typical phrases: the BAdI enhancement for the sales order, the IDoc interface, a BAPI or RFC call, the CDS view, the transport to Quality (QAS), the functional spec, the ALV report.',
+    terms,
+    translation_terms: SAP_KEEP.map(term => ({ source: term, target: term })),
+  }
+}
+
+// En la traducción se quedan igual (en SAP en español también se dicen así).
+const SAP_KEEP = ['BAdI', 'IDoc', 'BAPI', 'RFC', 'CDS view', 'OData', 'Fiori', 'ALV', 'SmartForms', 'Adobe Forms', 'user exit', 'S/4HANA', 'ABAP']
 
 function toPcm16(frame: Float32Array): ArrayBuffer {
   const out = new Int16Array(frame.length)
@@ -88,7 +121,7 @@ async function fetchToken(meetingId: string): Promise<{ apiKey: string; model: s
 
 export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks, opts: StreamEngineOptions): Promise<MeetingEngine> {
   let token = await fetchToken(opts.meetingId) // sin llave: lanza y el hook usa el motor por tramos
-  const turns = new StreamTurns(cb)
+  const turns = new StreamTurns(cb, opts.translateTo)
   const queue: ArrayBuffer[] = []
   let ws: WebSocket | null = null
   let ready = false
@@ -113,9 +146,10 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
       sample_rate: 16000,
       num_channels: 1,
       language_hints: ['en', 'es'],
+      enable_language_identification: true,
       enable_endpoint_detection: true,
       max_endpoint_delay_ms: 1500,
-      context: { terms: [...new Set([...SAP_TERMS, ...terms])].slice(0, MAX_TERMS) },
+      context: sonioxContext(terms),
       ...(opts.translateTo ? { translation: { type: 'one_way', target_language: opts.translateTo } } : {}),
     }
   }
