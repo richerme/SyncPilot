@@ -257,6 +257,12 @@ export default function LivePage() {
                 <span className={`w-1.5 h-1.5 rounded-full ${session.audioTracksOk ? 'bg-green-400 animate-pulse' : 'bg-amber-400'}`} />
                 {session.audioTracksOk ? '🎧 Reunión + Tu voz' : '🎙️ Solo tu voz'}
               </span>
+              {session.engineKind && (
+                <span className="text-xs px-2 py-1 rounded-full" title={session.engineKind === 'stream' ? 'Transcripción y traducción en streaming' : 'Transcripción por tramos (respaldo)'}
+                  style={{ background: 'var(--color-surface)', color: session.engineKind === 'stream' ? '#67E8F9' : 'var(--color-text-muted)' }}>
+                  {session.engineKind === 'stream' ? '⚡ Palabra por palabra' : 'Por tramos'}
+                </span>
+              )}
             </>
           )}
           <Link href="/dashboard" className="text-xs px-3 py-1.5 rounded-lg"
@@ -461,7 +467,7 @@ export default function LivePage() {
               </div>
             </div>
 
-            <button onClick={() => session.startSession(voiceLang)} className="btn-primary flex items-center gap-2 px-8 py-3">
+            <button onClick={() => session.startSession(voiceLang, translator.lang)} className="btn-primary flex items-center gap-2 px-8 py-3">
               <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>

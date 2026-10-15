@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { COPILOT_NAME, NAME_PATTERN } from '../copilot/profile'
 import { startChunkedEngine } from '../engines/chunkedEngine'
+import { startStreamEngine } from '../engines/streamEngine'
 import type { EngineCallbacks, EngineKind, LivePreview, MeetingEngine } from '../engines/types'
 import { streamAnswer, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
 
@@ -77,6 +78,8 @@ export function useLiveSession() {
   const engineRef         = useRef<MeetingEngine | null>(null)
   const meetingBufferRef  = useRef<string>('')                 // texto del turno aún sin volcar
   const unsavedRef        = useRef(new Map<string, TranscriptSegment>()) // fragmentos que aún no confirma el servidor
+  const contextTermsRef   = useRef<Promise<string[]> | null>(null)        // términos de los documentos (para el streaming)
+  const translateToRef    = useRef<string | null>('es')
   const turnTextRef       = useRef<string>('')                 // todo lo dicho en el turno actual
   const nameArmedRef      = useRef<number | null>(null)
   const nameTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -143,18 +146,20 @@ export function useLiveSession() {
     return lines.join('\n').slice(-20000)
   }
 
-  async function loadMeetingContext(meetingId: string) {
+  async function loadMeetingContext(meetingId: string): Promise<string[]> {
     setMeetingContext({ status: 'loading', docs: [], brief: '', terms: [], cached: false })
     try {
       const res = await fetch(`/api/meetings/${meetingId}/context`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
-      if (meetingIdRef.current !== meetingId) return
+      if (meetingIdRef.current !== meetingId) return []
       setMeetingContext({ status: 'ready', docs: data.docs ?? [], brief: data.brief ?? '', terms: data.terms ?? [], cached: !!data.cached })
       addLog(`Contexto: ${data.docs?.length ?? 0} documentos${data.cached ? ' en caché' : ''}`)
+      return Array.isArray(data.terms) ? data.terms : []
     } catch (err) {
       addLog(`Contexto: ${err instanceof Error ? err.message : String(err)}`)
       if (meetingIdRef.current === meetingId) setMeetingContext(prev => prev && { ...prev, status: 'error' })
+      return []
     }
   }
 
@@ -208,6 +213,10 @@ export function useLiveSession() {
       turnTextRef.current = `${turnTextRef.current} ${text}`.trim()
       addSegment(text, 'meeting', translation)
     },
+    amendTranslation(text) {
+      const last = [...transcriptRef.current].reverse().find(seg => seg.speaker === 'meeting')
+      if (last) setSegmentTranslations(prev => ({ ...prev, [last.id]: `${prev[last.id] ?? ''}${text}`.trim() }))
+    },
     turnEnd() {
       if (nameArmedRef.current !== null) fireName()
       turnTextRef.current = ''
@@ -217,6 +226,13 @@ export function useLiveSession() {
       if (NAME_PATTERN.test(text) && nameArmedRef.current === null && Date.now() - lastNameAnswerRef.current > NAME_COOLDOWN_MS) armName()
     },
     log: addLog,
+  }
+
+  async function fallBackToChunked(tracks: MediaStream, reason: string) {
+    if (!shouldRestartRef.current) return
+    addLog(`Streaming falló (${reason}): sigo con la transcripción por tramos`)
+    engineRef.current = await startChunkedEngine(tracks, engineCallbacks)
+    setEngineKind('chunked')
   }
 
   async function launchMeetingCapture() {
@@ -241,7 +257,20 @@ export function useLiveSession() {
       }
     })
 
-    engineRef.current = await startChunkedEngine(new MediaStream(audioTracks), engineCallbacks)
+    // Streaming (palabra por palabra + traducción a la par) si está configurado; si no, o si
+    // falla, la transcripción por tramos.
+    const tracks = new MediaStream(audioTracks)
+    try {
+      engineRef.current = await startStreamEngine(tracks, engineCallbacks, {
+        meetingId: meetingIdRef.current ?? '',
+        translateTo: translateToRef.current,
+        terms: () => contextTermsRef.current ?? Promise.resolve([]),
+        onFail: reason => { void fallBackToChunked(tracks, reason) },
+      })
+    } catch (err) {
+      addLog(`Streaming no disponible (${err instanceof Error ? err.message : String(err)}): transcripción por tramos`)
+      engineRef.current = await startChunkedEngine(tracks, engineCallbacks)
+    }
     setEngineKind(engineRef.current.kind)
     setAudioTracksOk(true)
     setIsListening(true)
@@ -296,7 +325,8 @@ export function useLiveSession() {
   // ─────────────────────────────────────────────────────────
   // Ciclo de vida
   // ─────────────────────────────────────────────────────────
-  const startSession = useCallback(async (voiceLang = 'en-US') => {
+  const startSession = useCallback(async (voiceLang = 'en-US', translateTo: string | null = 'es') => {
+    translateToRef.current = translateTo
     setStatus('starting')
     setError(null)
     setTranscript([])
@@ -328,7 +358,7 @@ export function useLiveSession() {
       meetingIdRef.current = data.meeting_id
       setMeetingId(data.meeting_id)
       // Documentos completos + de qué trata la reunión, sin detener el inicio.
-      void loadMeetingContext(data.meeting_id)
+      contextTermsRef.current = loadMeetingContext(data.meeting_id)
       sessionStartRef.current  = Date.now()
       shouldRestartRef.current = true
 

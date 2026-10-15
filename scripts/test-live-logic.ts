@@ -7,6 +7,7 @@ import { SpeechSegmenter, OrderedDelivery, encodeWav } from '../src/features/liv
 import { extractDocxText } from '../src/lib/docx'
 import { NAME_PATTERN } from '../src/features/live/copilot/profile'
 import { createChunkedTranscriber } from '../src/features/live/engines/chunkedEngine'
+import { StreamTurns } from '../src/features/live/engines/streamEngine'
 import type { EngineCallbacks } from '../src/features/live/engines/types'
 
 let failures = 0
@@ -112,6 +113,25 @@ async function engineTests() {
   const waited = Date.now() - t0
   await core2.stop()
   check(commits2.length > 0 && waited < 7000 && !/t0/.test(commits2.join(' ')), `un tramo sin respuesta se suelta a los 5 s y los demás siguen (${(waited / 1000).toFixed(1)} s: ${commits2.join(' | ')})`)
+}
+
+// 8) Streaming: tokens no finales se reemplazan, <end> cierra el pedazo con su traducción
+{
+  const log: string[] = []
+  const turns = new StreamTurns({
+    preview: p => log.push(`P[${p.text}|${p.tentative}]`), translationPreview: p => log.push(`T[${p.text}|${p.tentative}]`),
+    commit: (t, tr) => log.push(`C[${t}=>${tr ?? ''}]`), amendTranslation: t => log.push(`A[${t}]`),
+    turnEnd: () => log.push('END'), heard: t => log.push(`H[${t}]`), log: () => {},
+  })
+  const tr = (text: string, is_final = true) => ({ text, is_final, translation_status: 'translation' })
+  turns.handle({ tokens: [{ text: 'Rick,', is_final: true }, { text: ' can you', is_final: false }] })
+  check(log.includes('H[Rick,]') && log.includes('P[Rick,|can you]'), 'muestra lo final y lo tentativo por separado')
+  turns.handle({ tokens: [{ text: ' can you check the BAdI?', is_final: true }, tr('Rick, ¿puedes', false)] })
+  turns.handle({ tokens: [tr('Rick, ¿puedes revisar el BAdI?'), { text: '<end>', is_final: true }] })
+  check(log.includes('C[Rick, can you check the BAdI?=>Rick, ¿puedes revisar el BAdI?]') && log[log.length - 1] === 'END', `<end> cierra el pedazo con su traducción (${log.slice(-3).join(' ')})`)
+  turns.handle({ tokens: [{ text: 'Sure.', is_final: true }, { text: '<end>', is_final: true }] })
+  turns.handle({ tokens: [tr(' Claro.')] })
+  check(log.includes('A[ Claro.]'), 'la traducción que llega después se agrega al último pedazo')
 }
 
 engineTests().then(() => {

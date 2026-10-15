@@ -17,6 +17,8 @@ export interface EngineCallbacks {
   translationPreview?(p: LivePreview): void
   /** Pedazo cerrado: va al historial y se guarda. `translation` solo en stream. */
   commit(text: string, translation?: string): void
+  /** Traducción que llegó después de cerrar el pedazo: se agrega al último (solo stream). */
+  amendTranslation?(text: string): void
   /** Terminó de hablar quien tenía la palabra. */
   turnEnd(): void
   /** Texto recién reconocido, para detectar el nombre lo antes posible. */

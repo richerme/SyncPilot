@@ -17,3 +17,12 @@ Rules:
 - Never invent facts that are not in the transcript or documents (ticket numbers, dates, estimates, object names, status). If something is unknown, say so naturally and propose a next step (confirm with the functional team, check it in the system, follow up by email).
 - Do not commit to deadlines or scope unless the transcript already says so; offer to confirm instead.
 - No preamble, no headings, no quotes around the answer.`
+
+// Vocabulario que el reconocimiento de voz debe esperar (sin él, "BAdI" salía "batting").
+// Se suma a los términos que salen de los documentos de cada reunión (lib/meetingContext).
+export const SAP_TERMS = [
+  'SAP', 'S/4HANA', 'ECC', 'ABAP', 'BAdI', 'user exit', 'enhancement point', 'IDoc', 'BAPI', 'RFC', 'CDS view', 'RAP',
+  'OData', 'Fiori', 'ALV', 'SmartForms', 'Adobe Forms', 'transport', 'functional spec', 'technical spec', 'SE80', 'SE38',
+  'SE11', 'SE24', 'SM30', 'STMS', 'ST22', 'SM37', 'WE19', 'BD87', 'sales order', 'purchase order', 'delivery', 'invoice',
+  'material master', 'customer master', 'vendor', 'business partner', 'company code', 'plant', 'workflow', 'job', 'Z program',
+]
