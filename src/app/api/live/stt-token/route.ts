@@ -8,6 +8,10 @@ import { z } from 'zod'
 // temporal solo sirve para abrir una conexión en los próximos 2 minutos.
 const Schema = z.object({ meetingId: z.string().min(1).max(40) })
 const TEMP_KEY_URL = 'https://api.soniox.com/v1/auth/temporary-api-key'
+// v5 se retira el 15 dic 2026 (desde ahí Soniox manda todo a v6 solo). v6 salió el 3 nov con la
+// misma API y precio, pero ese día tradujo peor la jerga SAP («On the reporting side» → «información
+// informativa», «cutover» → «cambio de modelo», «BAdI» → «BADI») y mostró las palabras ~340 ms después.
+// Volver a medir con scripts/test-soniox-stream.ts (SONIOX_MODEL=stt-rt-v6) antes del 15 dic.
 const SONIOX_MODEL = 'stt-rt-v5'
 
 export async function POST(request: Request) {

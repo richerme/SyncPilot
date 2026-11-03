@@ -1,5 +1,5 @@
 // Prueba real del motor en streaming (PRP-003 fase 2) contra Soniox, sin navegador:
-//   npx tsx --env-file=.env --env-file=.env.local scripts/test-soniox-stream.ts <audio.wav 16 kHz mono> [es]
+//   npx tsx --env-file=.env --env-file=.env.local scripts/test-soniox-stream.ts <audio.wav 16 kHz mono> [es]   (SONIOX_MODEL=stt-rt-v6 para probar otro modelo; CONTEXTO=rico = el de producción)
 // Crea una llave temporal como el servidor, abre el WebSocket como el navegador (llave en los
 // protocolos), manda el audio a tiempo real en tramos de 100 ms y mide cuánto tardan en verse
 // las palabras (tentativas y finales) y la traducción. Nunca imprime las llaves.
@@ -56,7 +56,7 @@ async function main() {
   }
   ws.onopen = async () => {
     ws.send(JSON.stringify({
-      model: 'stt-rt-v5', audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
+      model: process.env.SONIOX_MODEL ?? 'stt-rt-v5', audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
       language_hints: ['en', 'es'], enable_language_identification: true, enable_endpoint_detection: true, max_endpoint_delay_ms: 1500,
       context: process.env.CONTEXTO === 'rico' ? sonioxContext([]) : { terms: SAP_TERMS }, translation: { type: 'one_way', target_language: translateTo },
     }))
