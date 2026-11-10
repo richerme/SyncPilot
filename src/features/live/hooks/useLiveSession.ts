@@ -325,7 +325,7 @@ export function useLiveSession() {
   // ─────────────────────────────────────────────────────────
   // Ciclo de vida
   // ─────────────────────────────────────────────────────────
-  const startSession = useCallback(async (voiceLang = 'en-US', translateTo: string | null = 'es') => {
+  const startSession = useCallback(async (voiceLang = 'en-US', translateTo: string | null = 'es', title = '') => {
     translateToRef.current = translateTo
     setStatus('starting')
     setError(null)
@@ -350,7 +350,8 @@ export function useLiveSession() {
     try {
       const res = await fetch('/api/meetings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        // Con el cliente en el título, el Copiloto elige su entrada en documentos con varios clientes.
+        body: JSON.stringify(title.trim() ? { title: title.trim().slice(0, 120) } : {}),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Error al crear sesión')

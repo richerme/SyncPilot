@@ -193,6 +193,7 @@ export default function LivePage() {
   const [docCount,     setDocCount]     = useState(0)
   const [showDebug,    setShowDebug]    = useState(false)
   const [voiceLang,    setVoiceLang]    = useState<string>('en-US')
+  const [meetingTitle, setMeetingTitle] = useState('')
 
   // Traducción a la derecha de la transcripción: solo si está activa en
   // Voice AI Tools → Live Translator (si se cambia allá, se aplica aquí al momento).
@@ -493,6 +494,13 @@ export default function LivePage() {
                   📄 {docCount} documento{docCount > 1 ? 's' : ''} de contexto — el Copiloto los usará para responder.
                 </p>
               )}
+              <label className="flex items-center gap-2 pt-1">
+                <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-text-secondary)' }}>Cliente o título (opcional):</span>
+                <input id="meeting-title" value={meetingTitle} onChange={e => setMeetingTitle(e.target.value)} maxLength={120}
+                  placeholder="Ej.: Cliente · estatus semanal" title="Con el cliente aquí, el Copiloto usa solo su parte de los documentos con varios clientes"
+                  className="flex-1 text-xs px-2.5 py-1 rounded-lg outline-none"
+                  style={{ background: 'var(--color-surface)', border: '1px solid var(--color-surface-border)', color: 'var(--color-text)' }} />
+              </label>
               <div className="flex items-center gap-2 pt-1">
                 <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>Idioma de tu voz:</span>
                 {VOICE_LANGS.map(l => (
@@ -509,7 +517,7 @@ export default function LivePage() {
               </div>
             </div>
 
-            <button onClick={() => session.startSession(voiceLang, translator.lang)} className="btn-primary flex items-center gap-2 px-8 py-3">
+            <button onClick={() => session.startSession(voiceLang, translator.lang, meetingTitle)} className="btn-primary flex items-center gap-2 px-8 py-3">
               <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
