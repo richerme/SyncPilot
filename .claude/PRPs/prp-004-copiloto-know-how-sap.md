@@ -1,6 +1,6 @@
 # PRP-004: Copiloto con know-how de consultor SAP ABAP y búsqueda en internet
 
-> **Estado**: FASES 1-2 IMPLEMENTADAS EN RAMA, SIN SUBIR (2026-11-10). Aprobado el 10 nov (fases 1 y 2; «Investigar» solo con botón). Rama `feat/prp004-know-how`; falta el OK del usuario en el chat para subirlo.
+> **Estado**: FASES 1-2 EN PRODUCCIÓN (2026-11-10 14:21, commit `fd4a8b8`, deploy verde). Aprobado el 10 nov (fases 1 y 2; «Investigar» solo con botón); el usuario dio el OK en el chat («sube el know-how de SyncPilot»). Falta la fase 3 (ajustes con reuniones reales).
 > **Pedido del usuario (10 nov)**: que el Copiloto, cuando lo que preguntan no está en la reunión ni en los Documentos, conteste de forma proactiva como un consultor SAP ABAP actual o investigue rápido en internet; y que tenga de respaldo un «know-how» de todo lo que hoy debe saber un consultor SAP ABAP, guardado como prompt, para entender bien las preguntas y contestar mejor.
 
 ## Lo que hay hoy (verificado en el código, 10 nov)
@@ -142,6 +142,16 @@ Falta el OK del usuario en el chat («sube el know-how de SyncPilot») para hace
   - **Respaldo de OpenRouter:** con modelos de Google usa la búsqueda nativa (mismo precio de Google); con Exa, 0.007 USD por petición.
 - **No probado:** la pantalla en el navegador. No levanté la app local con BD y sesión. tsc pasa; el proyecto no tiene configuración de ESLint v9.
 
+### Agregado al subir: documentos con varios clientes (commits `707da4d`, `fd4a8b8`)
+
+Pedido del usuario (10 nov): su documento de estatus trae a varios clientes, cada uno con la fecha y hora de su reunión, y el Copiloto debe usar solo la entrada de la reunión actual.
+- `src/lib/meetingIdentity.ts`: bloque «THIS MEETING» en cada pregunta (título si trae cliente, fecha en ISO, dd/mm/aaaa, español e inglés, y hora de Ciudad de México; `SYNCPILOT_TIME_ZONE` la cambia).
+- Regla en `profile.ts` (va en el caché): primero la entrada que coincide en cliente, fecha y hora; si no, por el cliente del título o lo que se dice; nunca mezclar tareas de otros clientes; si no se sabe, sin datos del proyecto.
+- El resumen inicial (`buildBrief`) recibe la reunión, elige esa entrada y dice cuál tomó; el título entra a la llave del contexto.
+- «Investigar»: el título de la reunión se suma a lo que nunca sale a internet.
+- En Vivo: campo opcional «Cliente o título» antes de iniciar (el POST de reuniones valida el título con Zod). Sin él, el título era «Reunión dd/mm/aaaa».
+- Prueba real con clientes inventados (`scripts/test-meeting-identity.ts --real`): los 3 casos (fecha y hora, título, conversación) eligen la entrada correcta en 1.3-2.0 s. Caché con la regla: 6,549 tokens, primera palabra 0.73-0.77 s.
+- Sin probar en el navegador: el campo nuevo y la tarjeta de «Investigar» (se revisan en la primera reunión real).
 ## Aprendizajes
 
 ### 2026-11-10: El Copiloto dependía de un solo proveedor
