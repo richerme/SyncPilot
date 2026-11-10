@@ -1,6 +1,6 @@
 # PRP-004: Copiloto con know-how de consultor SAP ABAP y búsqueda en internet
 
-> **Estado**: APROBADO (2026-11-10): fases 1 y 2; «Investigar» solo con botón, con la pregunta y el contexto de la reunión. Implementación en la rama `feat/prp004-know-how`.
+> **Estado**: FASES 1-2 IMPLEMENTADAS EN RAMA, SIN SUBIR (2026-11-10). Aprobado el 10 nov (fases 1 y 2; «Investigar» solo con botón). Rama `feat/prp004-know-how`; falta el OK del usuario en el chat para subirlo.
 > **Pedido del usuario (10 nov)**: que el Copiloto, cuando lo que preguntan no está en la reunión ni en los Documentos, conteste de forma proactiva como un consultor SAP ABAP actual o investigue rápido en internet; y que tenga de respaldo un «know-how» de todo lo que hoy debe saber un consultor SAP ABAP, guardado como prompt, para entender bien las preguntas y contestar mejor.
 
 ## Lo que hay hoy (verificado en el código, 10 nov)
@@ -80,10 +80,67 @@
 - **Sin regresiones:** las preguntas del proyecto siguen saliendo solo de la reunión y los Documentos.
 - **Costo:** medido y anotado.
 
-## Lo que necesito del usuario para avanzar
+## Decisiones del usuario (10 nov)
 
-1. Aprobar el alcance: solo la fase 1, o la 1 y la 2.
-2. Para la fase 2, decidir si «Investigar» es solo con botón o también automático cuando el Copiloto no sabe.
+1. Alcance: fases 1 y 2.
+2. «Investigar» solo con botón. Toma lo que se pregunta y el contexto de lo que se está hablando en la reunión.
+
+## Implementación (10 nov 2026, rama `feat/prp004-know-how`, SIN SUBIR)
+
+Falta el OK del usuario en el chat («sube el know-how de SyncPilot») para hacer merge a main y desplegar.
+
+### Fase 1: know-how SAP ABAP (commit `a290cad`)
+
+- **El paquete:** `src/features/live/copilot/knowhow.ts`. Es solo del servidor; `profile.ts` también se usa en el navegador.
+  - Son 23.5k caracteres en inglés, escritos con palabras propias. Junto con las instrucciones suma **6,343 tokens**, menos que los 15-25k estimados: se priorizó que fuera denso y correcto.
+  - Temas: 18 secciones, desde S/4HANA hasta cómo trabaja un proyecto, más «quick how-tos».
+- **Regla nueva en `COPILOT_INSTRUCTIONS`:**
+  - Los datos del proyecto salen solo de la reunión y los Documentos.
+  - Las preguntas generales de SAP se contestan como consultor senior, sin inventar notas ni objetos.
+  - Si la respuesta depende del release, lo dice.
+- **Caché:**
+  - Se crea siempre con instrucciones + know-how, haya o no documentos. Antes solo se creaba con documentos de 8k caracteres o más.
+  - Si los documentos no caben, van como fragmentos en la pregunta (`docsInCache`).
+  - El respaldo de OpenRouter lleva el mismo texto en el prompt.
+- **Medido** (`scripts/test-copilot-knowhow.ts`):
+  - El caché se crea en 0.5 s, al iniciar la reunión (ruta `/context`), no al preguntar.
+  - Primera palabra: 0.83-1.25 s con caché y 0.87-1.26 s sin caché, igual que antes.
+  - Las 3 preguntas de los criterios salieron concretas: SE18, el breakpoint en `CL_EXITHANDLER=>GET_INSTANCE` y Custom Logic; WE02/WE19/BD87; BAPI no liberado → RAP facade/EML o wrapper tier 2.
+- **Costo:** el almacenamiento del caché es 0.50-1.00 USD por millón de tokens por hora (aistudio.google.com/docs/pricing). Son ~6.4k tokens más, unos **0.003-0.006 USD por hora de reunión**.
+
+### Fase 2: «Investigar» (commits `ae61132`, `1caa9ba`)
+
+- **Pantalla:** botón «🔎 Investigar» en cada respuesta terminada (`src/app/live/page.tsx`). Llama a `POST /api/meetings/:id/research` y abre debajo la tarjeta «Verificado en internet».
+- **Lo que muestra la tarjeta:**
+  - la búsqueda que salió;
+  - el resultado sin modificar;
+  - 1-3 fuentes (título · dominio);
+  - las «Search Suggestions» de Google, en un iframe sandbox sin scripts, porque los términos del grounding piden mostrarlas con el resultado.
+- **Privacidad** (`src/lib/copilotResearch.ts`):
+  1. **Reescribir:** el modelo ve la pregunta, la primera respuesta y los últimos 4,000 caracteres de la reunión, y devuelve una pregunta genérica de SAP estándar, o vacía si es solo del proyecto.
+  2. **Filtro fijo (`scrubQuery`):** quita objetos Z/Y, correos, URLs, números de 5 o más dígitos, SID-mandante y los términos propios de los documentos. Son propios los que no aparecen en el know-how ni en `SAP_TERMS` y no parecen transacción; cada palabra de un nombre compuesto también se bloquea.
+  3. **Buscar:** Gemini + `googleSearch` recibe SOLO esa pregunta.
+  - Respaldo en cada paso: OpenRouter (y en la búsqueda, el plugin `web`).
+- **Historial:** se guarda como `meetingSuggestion` tipo `info` con `context = "Investigar: <búsqueda>"`, sin cambios de esquema. Los términos de Google permiten guardarlo como historial del usuario.
+- **Pruebas** (`scripts/test-copilot-research.ts`), todas pasan:
+  - Sin red, 13 pruebas: con una reunión inventada (empresa, persona, SID, objeto Z, ticket y proyecto ficticios) la búsqueda nunca recibe nada de eso, aunque la reescritura «se equivoque». Una pregunta solo del proyecto no busca. Si Gemini se queda sin saldo, entra el respaldo. Los parsers de Gemini y OpenRouter funcionan.
+  - `--real 10`: 10 llamadas, sin ninguna fuga.
+- **Latencia** (10 llamadas reales; reescribir con gemini-3.5-flash + Google Search):
+
+  | Paso | p50 | p90 |
+  |---|---|---|
+  | Reescribir | 0.94 s | 1.67 s |
+  | Buscar | 3.05 s | 4.25 s |
+  | **Total** | **4.1 s** | **5.2 s** |
+
+  Cumple el criterio de 6 s o menos.
+- **Costo por clic**, con el precio de Google en aistudio.google.com/docs/pricing (10 nov):
+  - **Búsquedas:** 1.8 de Google por clic. El grounding de Gemini 3 y posteriores da 5,000 búsquedas gratis al mes, compartidas entre esos modelos con la misma cuenta; después cobra 14 USD por 1,000. Cada consulta a Google se cobra aparte: «A customer-submitted request to Gemini may result in one or more queries».
+    - Dentro de lo gratis: 0 USD (~2,700 clics al mes).
+    - Después: ~0.025 USD por clic.
+  - **Tokens:** ~0.002 USD por clic.
+  - **Respaldo de OpenRouter:** con modelos de Google usa la búsqueda nativa (mismo precio de Google); con Exa, 0.007 USD por petición.
+- **No probado:** la pantalla en el navegador. No levanté la app local con BD y sesión. tsc pasa; el proyecto no tiene configuración de ESLint v9.
 
 ## Aprendizajes
 
@@ -91,3 +148,19 @@
 - **Error**: Gemini respondió 402 «prepayment credits are depleted» y el Copiloto mostró «No se pudo generar la respuesta» en dos reuniones seguidas.
 - **Fix**: respaldo por OpenRouter y error que dice qué pasó (`src/lib/copilotAnswer.ts`).
 - **Aplicar en**: cualquier llamada en vivo con un solo proveedor. También el resumen y los términos del contexto de la reunión (`buildBrief`), que hoy se quedan vacíos sin avisar si Gemini falla.
+
+### 2026-11-10: El filtro fijo dejaba restos si quitaba primero los nombres
+- **Error**: con «laura@ficticio.example» y «FNP-300», quitar primero los términos «Laura», «Ficticio» y «FNP» dejaba «@.example» y «-300» en la búsqueda.
+- **Fix**: primero los patrones completos (correo, URL, SID-mandante, objetos Z/Y, números largos) y después los términos sueltos (`scrubQuery`).
+- **Aplicar en**: cualquier limpieza de datos con patrones y listas a la vez: siempre del patrón más grande al más chico.
+
+### 2026-11-10: gemini-3.5-flash ya se enruta a gemini-3.6-flash
+- **Hallazgo**: la respuesta trae `modelVersion: gemini-3.6-flash`, y la página de precios de Google ya no lista 3.5 Flash. Según fuentes externas, Google lo marcó obsoleto el 8 oct 2026.
+- **Qué hacer**: fuera del alcance de este PRP. Al cambiar `GEMINI_MODELS`, volver a medir la latencia de transcribir y del Copiloto.
+
+### 2026-11-10: Los términos del grounding con Google Search
+- Mostrar el resultado sin modificarlo, con sus enlaces y las Search Suggestions, solo al usuario que lo pidió.
+- No poner nada intermedio entre el enlace y el destino.
+- No analizar ni entrenar con los resultados.
+- Guardarlos como historial del usuario está permitido (hasta 2 años).
+- Por eso la tarjeta muestra el texto tal cual y el iframe de sugerencias.
