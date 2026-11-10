@@ -6,6 +6,7 @@ import { GEMINI_MODELS, NO_THINKING } from '@/lib/geminiModels'
 import { relevantDocContext } from '@/lib/docContext'
 import { getMeetingContext, type MeetingContext } from '@/lib/meetingContext'
 import { COPILOT_INSTRUCTIONS, COPILOT_NAME } from '@/features/live/copilot/profile'
+import { openWithFallback, chatCompletionStream, CopilotUnavailableError, type CopilotProvider } from '@/lib/copilotAnswer'
 import { z } from 'zod'
 
 export const maxDuration = 60
@@ -62,7 +63,8 @@ export async function POST(request: Request, { params }: RouteParams) {
   const { question, live, trigger } = parsed.data
 
   const ai = getGenAI()
-  if (!ai) return NextResponse.json({ error: 'Falta GEMINI_API_KEY en el servidor' }, { status: 500 })
+  const openRouterKey = process.env.OPENROUTER_API_KEY
+  if (!ai && !openRouterKey) return NextResponse.json({ error: 'Falta GEMINI_API_KEY (y OPENROUTER_API_KEY de respaldo) en el servidor' }, { status: 500 })
 
   // Documentos completos (caché de la reunión) + resumen + TODA la reunión + la pregunta.
   const [ctx, transcript] = await Promise.all([getMeetingContext(userId, meetingId), fullTranscript(meetingId, live)])
@@ -77,35 +79,79 @@ export async function POST(request: Request, { params }: RouteParams) {
   ].filter(Boolean).join('\n\n')
   const base = { temperature: 0.3, maxOutputTokens: 500, thinkingConfig: NO_THINKING } // primera palabra en ~1 s
 
-  const withoutCache = async () => ai.models.generateContentStream({
-    model: GEMINI_MODELS.copilot,
-    contents: [{ role: 'user', parts: [{ text: `${await docsForPrompt(ctx, userId, `${ask}\n${transcript.slice(-3000)}`)}\n\n${conversation}` }] }],
-    config: { ...base, systemInstruction: COPILOT_INSTRUCTIONS },
-  })
-  let result: Awaited<ReturnType<typeof withoutCache>>
-  if (ctx.cacheName) {
-    try {
-      // El caché ya trae las instrucciones del Copiloto y los documentos completos.
-      result = await ai.models.generateContentStream({
-        model: GEMINI_MODELS.copilot,
-        contents: [{ role: 'user', parts: [{ text: conversation }] }],
-        config: { ...base, cachedContent: ctx.cacheName },
-      })
-    } catch (err) {
-      console.warn('[meetings/answer] caché no disponible:', err instanceof Error ? err.message.slice(0, 160) : err)
-      result = await withoutCache()
+  // Proveedores en orden (10 nov 2026): Gemini (con caché si hay) y, si falla al abrir o en el primer
+  // pedazo, OpenRouter. Antes solo había Gemini: con su saldo prepagado agotado (402) el Copiloto fallaba.
+  const promptWithDocs = async () => `${await docsForPrompt(ctx, userId, `${ask}\n${transcript.slice(-3000)}`)}\n\n${conversation}`
+  const providers: CopilotProvider[] = []
+  if (ai) {
+    const withoutCache = async () => ai.models.generateContentStream({
+      model: GEMINI_MODELS.copilot,
+      contents: [{ role: 'user', parts: [{ text: await promptWithDocs() }] }],
+      config: { ...base, systemInstruction: COPILOT_INSTRUCTIONS },
+    })
+    providers.push({
+      name: 'Gemini',
+      open: async () => {
+        let result: Awaited<ReturnType<typeof withoutCache>>
+        if (ctx.cacheName) {
+          try {
+            // El caché ya trae las instrucciones del Copiloto y los documentos completos.
+            result = await ai.models.generateContentStream({
+              model: GEMINI_MODELS.copilot,
+              contents: [{ role: 'user', parts: [{ text: conversation }] }],
+              config: { ...base, cachedContent: ctx.cacheName },
+            })
+          } catch (err) {
+            console.warn('[meetings/answer] caché no disponible:', err instanceof Error ? err.message.slice(0, 160) : err)
+            result = await withoutCache()
+          }
+        } else {
+          result = await withoutCache()
+        }
+        return (async function* () { for await (const chunk of result) yield chunk.text ?? '' })()
+      },
+    })
+  }
+  if (openRouterKey) {
+    providers.push({
+      name: 'OpenRouter',
+      open: async () => chatCompletionStream({
+        url: 'https://openrouter.ai/api/v1/chat/completions',
+        apiKey: openRouterKey,
+        model: process.env.OPENROUTER_COPILOT_MODEL ?? 'google/gemini-2.5-flash',
+        system: COPILOT_INSTRUCTIONS,
+        user: await promptWithDocs(),
+        temperature: base.temperature,
+        maxTokens: base.maxOutputTokens,
+        headers: { 'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000', 'X-Title': 'SyncPilot' },
+      }),
+    })
+  }
+
+  let opened: Awaited<ReturnType<typeof openWithFallback>>
+  try {
+    opened = await openWithFallback(providers)
+  } catch (err) {
+    if (err instanceof CopilotUnavailableError) {
+      console.error('[meetings/answer] sin proveedor:', err.failures.map(f => `${f.provider} ${f.kind}: ${f.detail}`).join(' | '))
+      return NextResponse.json({ error: err.message, kinds: err.failures.map(f => f.kind) }, { status: 503 })
     }
-  } else {
-    result = await withoutCache()
+    throw err
+  }
+  if (opened.failures.length) {
+    console.warn(`[meetings/answer] respondió ${opened.provider} (falló: ${opened.failures.map(f => `${f.provider} ${f.kind}`).join(', ')})`)
   }
 
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      let full = ''
+      let full = opened.first
+      if (full) controller.enqueue(encoder.encode(full))
       try {
-        for await (const chunk of result) {
-          const text = chunk.text ?? ''
+        for (;;) {
+          const r = await opened.rest.next()
+          if (r.done) break
+          const text = r.value
           if (!text) continue
           full += text
           controller.enqueue(encoder.encode(text))

@@ -5,7 +5,7 @@ import { COPILOT_NAME, NAME_PATTERN } from '../copilot/profile'
 import { startChunkedEngine } from '../engines/chunkedEngine'
 import { startStreamEngine } from '../engines/streamEngine'
 import type { EngineCallbacks, EngineKind, LivePreview, MeetingEngine } from '../engines/types'
-import { streamAnswer, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
+import { streamAnswer, copilotErrorText, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
 
 export type { CopilotAnswer }
 
@@ -175,7 +175,7 @@ export function useLiveSession() {
       update({ text: text || 'No answer was generated.', status: 'done' })
     } catch (err) {
       addLog(`Copiloto: ${err instanceof Error ? err.message : String(err)}`)
-      update({ text: 'No se pudo generar la respuesta. Intenta de nuevo.', status: 'error' })
+      update({ text: copilotErrorText(err), status: 'error' })
     } finally {
       copilotBusyRef.current = false
     }
