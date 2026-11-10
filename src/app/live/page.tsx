@@ -84,7 +84,40 @@ function useStickToBottom(deps: unknown[]) {
   return { ref, onScroll }
 }
 
-const AnswerCard = memo(function AnswerCard({ answer }: { answer: CopilotAnswer }) {
+// «Verificado en internet» (PRP-004). El resultado se muestra tal cual, con sus fuentes y las
+// sugerencias de Google: así lo piden los términos del grounding con Google Search.
+function ResearchBlock({ research }: { research: NonNullable<CopilotAnswer['research']> }) {
+  if (research.status === 'loading') {
+    return <p className="text-xs animate-pulse" style={{ color: '#67E8F9' }}>🔎 Buscando en internet (solo la pregunta técnica, sin datos de la reunión)…</p>
+  }
+  if (research.status === 'error') return <p className="text-xs" style={{ color: '#FBBF24' }}>{research.error}</p>
+  return (
+    <div className="rounded-lg p-2.5 space-y-1.5" style={{ background: 'rgb(34 211 238/0.07)', border: '1px solid rgb(34 211 238/0.3)' }}>
+      <p className="text-[11px] font-semibold" style={{ color: '#67E8F9' }}>
+        Verificado en internet{research.ms ? ` · ${(research.ms / 1000).toFixed(1)} s` : ''}
+      </p>
+      <p className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>Búsqueda: «{research.query}»</p>
+      <p className="text-sm text-white leading-relaxed whitespace-pre-wrap">{research.text}</p>
+      {!!research.sources?.length && (
+        <ul className="space-y-0.5">
+          {research.sources.map(s => (
+            <li key={s.url} className="text-xs truncate">
+              <a href={s.url} target="_blank" rel="noopener noreferrer" className="underline" style={{ color: '#818CF8' }}>{s.title}</a>
+              {s.domain && s.domain !== s.title.toLowerCase() && <span style={{ color: 'var(--color-text-muted)' }}> · {s.domain}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {research.suggestionsHtml && (
+        // Sin scripts; los enlaces abren en otra pestaña.
+        <iframe title="Sugerencias de Google" sandbox="allow-popups allow-popups-to-escape-sandbox"
+          srcDoc={`<base target="_blank">${research.suggestionsHtml}`} className="w-full h-16 border-0 rounded" />
+      )}
+    </div>
+  )
+}
+
+const AnswerCard = memo(function AnswerCard({ answer, onResearch }: { answer: CopilotAnswer; onResearch: (a: CopilotAnswer) => void }) {
   const [copied, setCopied] = useState(false)
   const streaming = answer.status === 'streaming'
   return (
@@ -98,13 +131,20 @@ const AnswerCard = memo(function AnswerCard({ answer }: { answer: CopilotAnswer 
         {streaming && answer.text && <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle animate-pulse bg-indigo-300" />}
       </p>
       {answer.status === 'done' && (
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-3">
+          {(!answer.research || answer.research.status === 'error') && (
+            <button onClick={() => onResearch(answer)} title="Busca en internet solo la pregunta técnica, sin nombres ni datos de la reunión"
+              className="text-xs opacity-70 hover:opacity-100 transition-opacity" style={{ color: '#67E8F9' }}>
+              🔎 Investigar
+            </button>
+          )}
           <button onClick={() => { navigator.clipboard.writeText(answer.text); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
             className="text-xs opacity-60 hover:opacity-100 transition-opacity" style={{ color: '#818CF8' }}>
             {copied ? 'Copiado ✓' : 'Copiar ↗'}
           </button>
         </div>
       )}
+      {answer.research && <ResearchBlock research={answer.research} />}
     </div>
   )
 })
@@ -397,7 +437,7 @@ export default function LivePage() {
                   : 'Inicia la sesión para usar el Copiloto.'}
               </p>
             )}
-            {session.answers.map(a => <AnswerCard key={a.id} answer={a} />)}
+            {session.answers.map(a => <AnswerCard key={a.id} answer={a} onResearch={session.researchCopilot} />)}
             {session.nameHeard && (
               <div className="p-3 rounded-lg text-xs flex items-center gap-2 animate-pulse"
                 style={{ background: 'rgb(245 158 11/0.1)', border: '1px solid rgb(245 158 11/0.3)', color: '#FBBF24' }}>

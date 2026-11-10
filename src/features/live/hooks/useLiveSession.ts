@@ -5,7 +5,7 @@ import { COPILOT_NAME, NAME_PATTERN } from '../copilot/profile'
 import { startChunkedEngine } from '../engines/chunkedEngine'
 import { startStreamEngine } from '../engines/streamEngine'
 import type { EngineCallbacks, EngineKind, LivePreview, MeetingEngine } from '../engines/types'
-import { streamAnswer, copilotErrorText, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
+import { streamAnswer, researchAnswer, copilotErrorText, CopilotError, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
 
 export type { CopilotAnswer }
 
@@ -424,6 +424,22 @@ export function useLiveSession() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /** «Investigar» (PRP-004): verifica en internet una respuesta, con la pregunta y lo último de la reunión. */
+  const researchCopilot = useCallback(async (answer: CopilotAnswer) => {
+    const update = (research: CopilotAnswer['research']) => setAnswers(prev => prev.map(a => (a.id === answer.id ? { ...a, research } : a)))
+    if (!meetingIdRef.current) { update({ status: 'error', error: 'La reunión ya terminó: no se puede investigar.' }); return }
+    update({ status: 'loading' })
+    try {
+      const r = await researchAnswer(meetingIdRef.current, { question: answer.question ?? undefined, answer: answer.text, live: liveForCopilot() })
+      update({ status: 'done', ...r })
+      addLog(`Investigar: «${r.query ?? ''}» (${r.ms ?? '?'} ms)`)
+    } catch (err) {
+      addLog(`Investigar: ${err instanceof Error ? err.message : String(err)}`)
+      update({ status: 'error', error: err instanceof CopilotError && err.forUser ? err.message : 'No se pudo buscar en internet. Intenta de nuevo.' })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const clearAnswers = useCallback(() => setAnswers([]), [])
 
   const resetSession = useCallback(() => {
@@ -441,6 +457,6 @@ export function useLiveSession() {
     status, meetingId, transcript, answers, wordCount, duration, nameHeard,
     error, isListening, interimText, meetingInterim, meetingTentative, audioTracksOk, debugLogs,
     engineKind, segmentTranslations, liveTranslation, meetingContext,
-    startSession, endSession, askCopilot, clearAnswers, resetSession,
+    startSession, endSession, askCopilot, researchCopilot, clearAnswers, resetSession,
   }
 }
