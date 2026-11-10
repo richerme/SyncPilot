@@ -5,6 +5,7 @@ import { getGenAI } from '@/lib/openrouter'
 import { GEMINI_MODELS, NO_THINKING } from '@/lib/geminiModels'
 import { relevantDocContext } from '@/lib/docContext'
 import { getMeetingContext, type MeetingContext } from '@/lib/meetingContext'
+import { fullTranscript } from '@/lib/meetingTranscript'
 import { COPILOT_NAME } from '@/features/live/copilot/profile'
 import { COPILOT_SYSTEM } from '@/features/live/copilot/knowhow'
 import { openWithFallback, chatCompletionStream, CopilotUnavailableError, type CopilotProvider } from '@/lib/copilotAnswer'
@@ -20,23 +21,7 @@ const Schema = z.object({
   trigger:  z.enum(['button', 'name', 'typed']).default('button'),
 })
 
-// Toda la reunión (PRP-003): 1-2 h son ~40k tokens; el tope solo protege de lo absurdo.
-const MAX_TRANSCRIPT_CHARS = 400_000
 const RELEVANT_DOCS_CHARS  = 400_000
-
-function mmss(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000))
-  return `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`
-}
-
-/** La reunión completa desde la base de datos + lo que el navegador aún no guarda. */
-async function fullTranscript(meetingId: string, live: string): Promise<string> {
-  const rows = await prisma.transcript.findMany({
-    where: { meetingId }, orderBy: { startMs: 'asc' }, select: { startMs: true, speaker: true, text: true },
-  })
-  const saved = rows.map(r => `[${mmss(r.startMs)}] ${r.speaker === 'me' ? COPILOT_NAME : 'Meeting'}: ${r.text}`).join('\n')
-  return `${saved}\n${live}`.trim().slice(-MAX_TRANSCRIPT_CHARS)
-}
 
 /** Documentos para el prompt cuando no hay caché (o el caché falló). */
 async function docsForPrompt(ctx: MeetingContext, userId: string, query: string): Promise<string> {
