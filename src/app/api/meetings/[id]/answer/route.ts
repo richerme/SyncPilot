@@ -5,7 +5,8 @@ import { getGenAI } from '@/lib/openrouter'
 import { GEMINI_MODELS, NO_THINKING } from '@/lib/geminiModels'
 import { relevantDocContext } from '@/lib/docContext'
 import { getMeetingContext, type MeetingContext } from '@/lib/meetingContext'
-import { COPILOT_INSTRUCTIONS, COPILOT_NAME } from '@/features/live/copilot/profile'
+import { COPILOT_NAME } from '@/features/live/copilot/profile'
+import { COPILOT_SYSTEM } from '@/features/live/copilot/knowhow'
 import { openWithFallback, chatCompletionStream, CopilotUnavailableError, type CopilotProvider } from '@/lib/copilotAnswer'
 import { z } from 'zod'
 
@@ -87,18 +88,19 @@ export async function POST(request: Request, { params }: RouteParams) {
     const withoutCache = async () => ai.models.generateContentStream({
       model: GEMINI_MODELS.copilot,
       contents: [{ role: 'user', parts: [{ text: await promptWithDocs() }] }],
-      config: { ...base, systemInstruction: COPILOT_INSTRUCTIONS },
+      config: { ...base, systemInstruction: COPILOT_SYSTEM },
     })
+    // Con caché: instrucciones + know-how (y los documentos, si cupieron) ya van dentro.
+    const cachedPrompt = async () => ctx.docsInCache || !ctx.docs.length ? conversation : promptWithDocs()
     providers.push({
       name: 'Gemini',
       open: async () => {
         let result: Awaited<ReturnType<typeof withoutCache>>
         if (ctx.cacheName) {
           try {
-            // El caché ya trae las instrucciones del Copiloto y los documentos completos.
             result = await ai.models.generateContentStream({
               model: GEMINI_MODELS.copilot,
-              contents: [{ role: 'user', parts: [{ text: conversation }] }],
+              contents: [{ role: 'user', parts: [{ text: await cachedPrompt() }] }],
               config: { ...base, cachedContent: ctx.cacheName },
             })
           } catch (err) {
@@ -119,7 +121,7 @@ export async function POST(request: Request, { params }: RouteParams) {
         url: 'https://openrouter.ai/api/v1/chat/completions',
         apiKey: openRouterKey,
         model: process.env.OPENROUTER_COPILOT_MODEL ?? 'google/gemini-2.5-flash',
-        system: COPILOT_INSTRUCTIONS,
+        system: COPILOT_SYSTEM, // sin caché: el know-how va en cada llamada (~10k tokens)
         user: await promptWithDocs(),
         temperature: base.temperature,
         maxTokens: base.maxOutputTokens,

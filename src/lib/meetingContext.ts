@@ -2,6 +2,10 @@
 // caché de Gemini (con las instrucciones del Copiloto), un resumen de qué trata la reunión y
 // los términos que se van a mencionar (para el reconocimiento de voz).
 //
+// PRP-004 (10 nov 2026): el caché también lleva el know-how SAP ABAP (features/live/copilot/knowhow).
+// Por eso se crea siempre, aunque no haya documentos o no quepan: el know-how solo ya pasa el mínimo
+// de tokens del caché, y así cada pregunta no vuelve a pagar esos tokens ni su tiempo.
+//
 // Medido el 15 oct: 198k caracteres de documentos + 30k de reunión (78k tokens) → primera
 // palabra del Copiloto en 1.25-1.8 s sin caché y 0.9-1.3 s con caché; el caché se crea en 0.6 s.
 //
@@ -12,11 +16,10 @@ import { prisma } from '@/lib/db'
 import { getGenAI } from '@/lib/openrouter'
 import { GEMINI_MODELS, NO_THINKING } from '@/lib/geminiModels'
 import { reextractStoredDocument, type DocumentExt } from '@/lib/documentText'
-import { COPILOT_INSTRUCTIONS } from '@/features/live/copilot/profile'
+import { COPILOT_SYSTEM } from '@/features/live/copilot/knowhow'
 
 const CACHE_TTL_S      = 3 * 3600
 const RENEW_BEFORE_MS  = 20 * 60_000
-const MIN_CACHE_CHARS  = 8_000      // ~2k tokens: con menos, los documentos van directo en el prompt
 const MAX_DOCS_CHARS   = 2_400_000  // ~600k tokens: más allá, se usa la búsqueda por fragmentos
 const BRIEF_DOC_CHARS  = 800_000
 const MAX_TERMS        = 100
@@ -28,6 +31,8 @@ export interface MeetingContext {
   docs: MeetingDocsInfo[]
   /** Documentos completos para el prompt cuando no hay caché ('' si van en el caché o no hay). */
   inlineDocs: string
+  /** true si los documentos completos van dentro del caché (si no, la ruta los agrega al prompt). */
+  docsInCache: boolean
   /** true si los documentos no caben completos y hay que elegir fragmentos (lib/docContext). */
   tooLarge: boolean
   cacheName: string | null
@@ -96,6 +101,7 @@ export async function buildBrief(docsText: string): Promise<{ brief: string; ter
   }
 }
 
+/** Caché de la reunión: instrucciones + know-how y, si caben, los documentos completos. */
 async function createCache(docsText: string): Promise<{ name: string; expiresAt: number } | null> {
   const ai = getGenAI()
   if (!ai) return null
@@ -103,8 +109,10 @@ async function createCache(docsText: string): Promise<{ name: string; expiresAt:
     const cache = await ai.caches.create({
       model: GEMINI_MODELS.copilot,
       config: {
-        systemInstruction: COPILOT_INSTRUCTIONS,
-        contents: [{ role: 'user', parts: [{ text: `REFERENCE DOCUMENTS (complete):\n\n${docsText}` }] }],
+        systemInstruction: COPILOT_SYSTEM,
+        contents: [{ role: 'user', parts: [{ text: docsText
+          ? `REFERENCE DOCUMENTS (complete):\n\n${docsText}`
+          : 'REFERENCE DOCUMENTS: not in this cache (if there are any, they come with the question).' }] }],
         ttl: `${CACHE_TTL_S}s`,
       },
     })
@@ -118,12 +126,13 @@ async function createCache(docsText: string): Promise<{ name: string; expiresAt:
 async function build(meetingId: string, docs: { name: string; text: string }[], key: string): Promise<MeetingContext> {
   const docsText = formatDocs(docs)
   const tooLarge = docsText.length > MAX_DOCS_CHARS
-  const useCache = !tooLarge && docsText.length >= MIN_CACHE_CHARS
-  const [cache, brief] = await Promise.all([useCache ? createCache(docsText) : Promise.resolve(null), buildBrief(docsText)])
+  const cachedDocs = tooLarge ? '' : docsText
+  const [cache, brief] = await Promise.all([createCache(cachedDocs), buildBrief(docsText)])
   const ctx: MeetingContext = {
     key,
     docs: docs.map(d => ({ name: d.name, chars: d.text.length })),
     inlineDocs: cache || tooLarge ? '' : docsText,
+    docsInCache: !!cache && !!cachedDocs,
     tooLarge,
     cacheName: cache?.name ?? null,
     expiresAt: cache?.expiresAt ?? 0,
