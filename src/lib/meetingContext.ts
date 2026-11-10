@@ -17,6 +17,7 @@ import { getGenAI } from '@/lib/openrouter'
 import { GEMINI_MODELS, NO_THINKING } from '@/lib/geminiModels'
 import { reextractStoredDocument, type DocumentExt } from '@/lib/documentText'
 import { COPILOT_SYSTEM } from '@/features/live/copilot/knowhow'
+import { describeMeeting, meaningfulTitle, type MeetingIdentity } from '@/lib/meetingIdentity'
 
 const CACHE_TTL_S      = 3 * 3600
 const RENEW_BEFORE_MS  = 20 * 60_000
@@ -73,18 +74,19 @@ export function formatDocs(docs: { name: string; text: string }[]): string {
   return docs.map(d => `===== DOCUMENT: ${d.name} =====\n${d.text.trim()}`).join('\n\n')
 }
 
-export async function buildBrief(docsText: string): Promise<{ brief: string; terms: string[] }> {
+export async function buildBrief(docsText: string, meeting?: MeetingIdentity | null): Promise<{ brief: string; terms: string[] }> {
   const ai = getGenAI()
   if (!ai || !docsText) return { brief: '', terms: [] }
   try {
     const r = await ai.models.generateContent({
       model: GEMINI_MODELS.copilot,
-      contents: [{ role: 'user', parts: [{ text: docsText.slice(0, BRIEF_DOC_CHARS) }] }],
+      contents: [{ role: 'user', parts: [{ text: `${meeting ? `${describeMeeting(meeting)}\n\n` : ''}${docsText.slice(0, BRIEF_DOC_CHARS)}` }] }],
       config: {
         systemInstruction: 'Preparas a Rick, consultor SAP ABAP, para una reunión de trabajo a partir de sus documentos. '
           + 'Devuelve JSON {"resumen": string, "terminos": string[]}. '
           + '"resumen": en español, de 4 a 7 viñetas cortas que empiecen con "• ": de qué trata la reunión, procesos y objetos SAP involucrados, pendientes o decisiones abiertas, y las preguntas que probablemente le harán. Sin inventar nada que no esté en los documentos. '
-          + `"terminos": hasta ${MAX_TERMS} términos exactos que se van a mencionar en voz alta (objetos Z, transacciones, tablas, BAdIs, IDocs, sistemas, nombres de personas y de la empresa), tal como aparecen en los documentos.`,
+          + 'Los documentos pueden traer el estatus de varios clientes o reuniones, cada uno con su fecha y hora: resume SOLO la entrada de ESTA reunión (bloque THIS MEETING), la que coincida en cliente, fecha y hora; si ninguna coincide en fecha y hora, la del cliente del título. La primera viñeta dice qué entrada tomaste y por qué («coincide la fecha y la hora» o «por el cliente del título»); si todavía no se puede saber, dilo así («Aún no sé de qué cliente es; lo sabré por la conversación») y nombra en esa misma viñeta los clientes que trae el documento. '
+          + `"terminos": primero los de esa entrada; hasta ${MAX_TERMS} términos exactos que se van a mencionar en voz alta (objetos Z, transacciones, tablas, BAdIs, IDocs, sistemas, nombres de personas y de la empresa), tal como aparecen en los documentos.`,
         temperature: 0.2,
         maxOutputTokens: 2048,
         responseMimeType: 'application/json',
@@ -123,11 +125,11 @@ async function createCache(docsText: string): Promise<{ name: string; expiresAt:
   }
 }
 
-async function build(meetingId: string, docs: { name: string; text: string }[], key: string): Promise<MeetingContext> {
+async function build(meetingId: string, docs: { name: string; text: string }[], key: string, meeting: MeetingIdentity | null): Promise<MeetingContext> {
   const docsText = formatDocs(docs)
   const tooLarge = docsText.length > MAX_DOCS_CHARS
   const cachedDocs = tooLarge ? '' : docsText
-  const [cache, brief] = await Promise.all([createCache(cachedDocs), buildBrief(docsText)])
+  const [cache, brief] = await Promise.all([createCache(cachedDocs), buildBrief(docsText, meeting)])
   const ctx: MeetingContext = {
     key,
     docs: docs.map(d => ({ name: d.name, chars: d.text.length })),
@@ -146,12 +148,16 @@ async function build(meetingId: string, docs: { name: string; text: string }[], 
 export async function getMeetingContext(userId: string, meetingId: string): Promise<MeetingContext> {
   const pending = building.get(meetingId)
   if (pending) return pending
-  const docs = await loadActiveDocs(userId)
-  const key = createHash('sha1').update(docs.map(d => `${d.name}:${d.text.length}`).join('|')).digest('hex')
+  const [docs, meeting] = await Promise.all([
+    loadActiveDocs(userId),
+    prisma.meeting.findFirst({ where: { id: meetingId, userId }, select: { title: true, startedAt: true } }),
+  ])
+  // El título entra a la llave: si la reunión trae el cliente, el resumen se arma para su entrada.
+  const key = createHash('sha1').update([...docs.map(d => `${d.name}:${d.text.length}`), meaningfulTitle(meeting?.title) ?? ''].join('|')).digest('hex')
   const current = registry.get(meetingId)
   if (current && current.key === key && await renewIfNeeded(current)) return current
   if (current?.cacheName) void deleteCache(current.cacheName)
-  const job = build(meetingId, docs, key).finally(() => building.delete(meetingId))
+  const job = build(meetingId, docs, key, meeting).finally(() => building.delete(meetingId))
   building.set(meetingId, job)
   return job
 }

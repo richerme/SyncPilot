@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db'
 import { getGenAI } from '@/lib/openrouter'
 import { getMeetingContext } from '@/lib/meetingContext'
 import { fullTranscript } from '@/lib/meetingTranscript'
+import { meaningfulTitle } from '@/lib/meetingIdentity'
 import { SAP_TERMS } from '@/features/live/copilot/profile'
 import { SAP_ABAP_KNOWHOW } from '@/features/live/copilot/knowhow'
 import { CopilotUnavailableError } from '@/lib/copilotAnswer'
@@ -35,7 +36,7 @@ export async function POST(request: Request, { params }: RouteParams) {
   const userId = session.user.id
 
   const { id: meetingId } = await params
-  const meeting = await prisma.meeting.findFirst({ where: { id: meetingId, userId }, select: { id: true, startedAt: true } })
+  const meeting = await prisma.meeting.findFirst({ where: { id: meetingId, userId }, select: { id: true, title: true, startedAt: true } })
   if (!meeting) return NextResponse.json({ error: 'Reunión no encontrada' }, { status: 404 })
 
   const parsed = Schema.safeParse(await request.json().catch(() => ({})))
@@ -60,7 +61,7 @@ export async function POST(request: Request, { params }: RouteParams) {
       question: question?.trim() || null,
       firstAnswer: answer,
       transcriptTail: transcript.slice(-4000),
-      blockedTerms: blockedTermsFrom(ctx.terms, STANDARD_VOCABULARY),
+      blockedTerms: blockedTermsFrom([...ctx.terms, ...(meaningfulTitle(meeting.title) ? [meaningfulTitle(meeting.title) as string] : [])], STANDARD_VOCABULARY),
     }, { rewrite, search })
     if (r.failures.length) console.warn(`[meetings/research] respondió ${r.provider} (falló: ${r.failures.map(f => `${f.provider} ${f.kind}`).join(', ')})`)
     // Historial de la reunión (los términos de Google lo permiten para el usuario que lo pidió).

@@ -6,6 +6,7 @@ import { GEMINI_MODELS, NO_THINKING } from '@/lib/geminiModels'
 import { relevantDocContext } from '@/lib/docContext'
 import { getMeetingContext, type MeetingContext } from '@/lib/meetingContext'
 import { fullTranscript } from '@/lib/meetingTranscript'
+import { copilotConversation } from '@/lib/meetingIdentity'
 import { COPILOT_NAME } from '@/features/live/copilot/profile'
 import { COPILOT_SYSTEM } from '@/features/live/copilot/knowhow'
 import { openWithFallback, chatCompletionStream, CopilotUnavailableError, type CopilotProvider } from '@/lib/copilotAnswer'
@@ -41,7 +42,7 @@ export async function POST(request: Request, { params }: RouteParams) {
   const userId = session.user.id
 
   const { id: meetingId } = await params
-  const meeting = await prisma.meeting.findFirst({ where: { id: meetingId, userId }, select: { id: true, startedAt: true } })
+  const meeting = await prisma.meeting.findFirst({ where: { id: meetingId, userId }, select: { id: true, title: true, startedAt: true } })
   if (!meeting) return NextResponse.json({ error: 'Reunión no encontrada' }, { status: 404 })
 
   const parsed = Schema.safeParse(await request.json().catch(() => ({})))
@@ -58,11 +59,7 @@ export async function POST(request: Request, { params }: RouteParams) {
   const ask = question?.trim()
     ? question.trim()
     : `The most recent question or request addressed to ${COPILOT_NAME} (or still waiting for his answer) in the transcript.`
-  const conversation = [
-    ctx.brief ? `MEETING CONTEXT (prepared from the documents, in Spanish):\n${ctx.brief}` : '',
-    `MEETING TRANSCRIPT (whole meeting so far, oldest first, [mm:ss] from the start; "${COPILOT_NAME}:" is ${COPILOT_NAME}, "Meeting:" are the other participants):\n${transcript || '(empty)'}`,
-    `${trigger === 'typed' ? `${COPILOT_NAME} wants help with` : 'QUESTION TO ANSWER'}: ${ask}`,
-  ].filter(Boolean).join('\n\n')
+  const conversation = copilotConversation({ meeting, brief: ctx.brief, transcript, trigger, ask })
   const base = { temperature: 0.3, maxOutputTokens: 500, thinkingConfig: NO_THINKING } // primera palabra en ~1 s
 
   // Proveedores en orden (10 nov 2026): Gemini (con caché si hay) y, si falla al abrir o en el primer
