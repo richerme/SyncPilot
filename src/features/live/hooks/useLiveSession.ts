@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { COPILOT_NAME, NAME_PATTERN } from '../copilot/profile'
 import { startChunkedEngine } from '../engines/chunkedEngine'
 import { startStreamEngine } from '../engines/streamEngine'
-import type { EngineCallbacks, EngineKind, LivePreview, MeetingEngine } from '../engines/types'
+import type { EngineCallbacks, EngineKind, EngineStatus, LivePreview, MeetingEngine } from '../engines/types'
 import { streamAnswer, researchAnswer, copilotErrorText, CopilotError, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
 
 export type { CopilotAnswer }
@@ -39,6 +39,7 @@ declare global {
 }
 
 const DURATION_TICK_MS      = 1000
+const MEMORY_TICK_MS        = 5 * 60_000 // memoria del navegador al registro y al diagnóstico
 // Cuando dicen tu nombre, el Copiloto espera a que terminen la pregunta (fin de
 // turno); si siguen hablando, contesta a los 8 s con lo que lleven.
 const NAME_FALLBACK_MS      = 8000
@@ -58,6 +59,7 @@ export function useLiveSession() {
   const [meetingInterim, setMeetingInterim] = useState('')      // audio de reunión (blanco): ya reconocido
   const [meetingTentative, setMeetingTentative] = useState('')  // lo que aún puede cambiar o tramos en camino
   const [engineKind,     setEngineKind]     = useState<EngineKind | null>(null)
+  const [engineStatus,   setEngineStatus]   = useState<EngineStatus>('ok') // reconectando / sin audio: aviso en pantalla
   // Traducción que llega junto con la transcripción (motor stream); en chunked la hace useLiveTranslation.
   const [segmentTranslations, setSegmentTranslations] = useState<Record<string, string>>({})
   const [liveTranslation, setLiveTranslation] = useState<LivePreview | null>(null)
@@ -68,6 +70,7 @@ export function useLiveSession() {
 
   const meetingIdRef      = useRef<string | null>(null)
   const timerRef          = useRef<ReturnType<typeof setInterval> | null>(null)
+  const memTimerRef       = useRef<ReturnType<typeof setInterval> | null>(null) // memoria del navegador cada 5 min (diagnóstico)
   const sessionStartRef   = useRef<number>(0)
   const transcriptRef     = useRef<TranscriptSegment[]>([])
   const wordCountRef      = useRef(0)
@@ -92,12 +95,31 @@ export function useLiveSession() {
     setDebugLogs(prev => [...prev.slice(-49), entry])
   }
 
+  /** Memoria que usa la página (solo Chrome/Edge la reportan), en MB. */
+  function heapMb(): number | null {
+    const mem = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory
+    return mem ? Math.round(mem.usedJSHeapSize / 1048576) : null
+  }
+
+  /** Evento de diagnóstico guardado con la reunión: si algo se traba, se sabe si fue la conexión, el audio o la memoria. */
+  function sendDiag(event: string, data: Record<string, unknown> = {}) {
+    const id = meetingIdRef.current
+    if (!id) return
+    void fetch(`/api/meetings/${id}/diag`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      body: JSON.stringify({ event, at: new Date().toISOString(), data: { ...data, heapMb: heapMb(), segments: transcriptRef.current.length } }),
+    }).catch(() => {})
+  }
+
   useEffect(() => {
     return () => {
       shouldRestartRef.current = false
       recognitionRef.current?.abort()
       stopAllStreams()
       if (timerRef.current)     clearInterval(timerRef.current)
+      if (memTimerRef.current)  clearInterval(memTimerRef.current)
       if (nameTimerRef.current) clearTimeout(nameTimerRef.current)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -226,11 +248,15 @@ export function useLiveSession() {
       if (NAME_PATTERN.test(text) && nameArmedRef.current === null && Date.now() - lastNameAnswerRef.current > NAME_COOLDOWN_MS) armName()
     },
     log: addLog,
+    status: setEngineStatus,
+    diag: sendDiag,
   }
 
   async function fallBackToChunked(tracks: MediaStream, reason: string) {
     if (!shouldRestartRef.current) return
     addLog(`Streaming falló (${reason}): sigo con la transcripción por tramos`)
+    sendDiag('fallback-chunked', { reason })
+    setEngineStatus('ok')
     engineRef.current = await startChunkedEngine(tracks, engineCallbacks)
     setEngineKind('chunked')
   }
@@ -249,6 +275,11 @@ export function useLiveSession() {
       throw new Error('No se encontró audio compartido. Selecciona "Pestaña" o "Toda la pantalla" y marca ✓ "Compartir audio".')
     }
     displayStreamRef.current = displayStream
+    // Si la pista de audio se corta sola (p. ej. se cerró la pestaña compartida), queda anotado.
+    audioTracks.forEach(t => t.addEventListener('ended', () => {
+      addLog('Reunión: la pista de audio compartida terminó')
+      sendDiag('audio-track-ended')
+    }))
     displayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
       if (shouldRestartRef.current) {
         setError('Compartir pantalla detenido.')
@@ -368,6 +399,11 @@ export function useLiveSession() {
       await launchMeetingCapture()
 
       timerRef.current = setInterval(() => setDuration(d => d + 1), DURATION_TICK_MS)
+      memTimerRef.current = setInterval(() => {
+        const mb = heapMb()
+        if (mb !== null) addLog(`Memoria: ${mb} MB · ${transcriptRef.current.length} renglones`)
+        sendDiag('memory')
+      }, MEMORY_TICK_MS)
       setStatus('active')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error al iniciar'
@@ -399,7 +435,10 @@ export function useLiveSession() {
     setInterimText('')
     engineCallbacks.preview(EMPTY_PREVIEW)
     setLiveTranslation(null)
+    setEngineStatus('ok')
     if (timerRef.current) clearInterval(timerRef.current)
+    if (memTimerRef.current) clearInterval(memTimerRef.current)
+    memTimerRef.current = null
 
     if (meetingIdRef.current) {
       await fetch(`/api/meetings/${meetingIdRef.current}`, {
@@ -457,7 +496,7 @@ export function useLiveSession() {
   return {
     status, meetingId, transcript, answers, wordCount, duration, nameHeard,
     error, isListening, interimText, meetingInterim, meetingTentative, audioTracksOk, debugLogs,
-    engineKind, segmentTranslations, liveTranslation, meetingContext,
+    engineKind, engineStatus, segmentTranslations, liveTranslation, meetingContext,
     startSession, endSession, askCopilot, researchCopilot, clearAnswers, resetSession,
   }
 }

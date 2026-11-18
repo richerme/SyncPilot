@@ -16,6 +16,42 @@ const CONNECT_TIMEOUT_MS = 8000
 const TERMS_WAIT_MS      = 4000  // espera los términos de los documentos (el audio se guarda mientras)
 const END_WAIT_MS        = 4000
 const MAX_TERMS          = 300
+// Vigilante (18 nov 2026: la transcripción y la traducción se congelaban a media reunión y había que
+// reiniciar). Con la conexión sana, Soniox manda un mensaje cada ~1 s aun en silencio (medido: 18 en
+// 20 s, hueco máximo 1.2 s), así que 10 s sin mensajes con la conexión abierta = conexión colgada.
+const STALL_MS            = 10_000
+const MAX_BUFFERED        = 1_000_000 // ~30 s de audio que no sale del navegador
+const NO_AUDIO_MS         = 3000      // el worklet entrega 10 tramos por segundo
+const WATCH_MS            = 1000
+const MAX_RECONNECTS      = 6         // por ventana de 10 min; después, al motor por tramos
+const RECONNECT_WINDOW_MS = 10 * 60_000
+
+export type WatchVerdict = 'ok' | 'no-audio' | 'stalled' | 'backlog'
+
+/** Decide con los tiempos si dejó de llegar el audio o si la conexión se colgó (lógica pura, se prueba sin red). */
+export class StreamWatchdog {
+  private lastMsgAt: number
+  private lastFrameAt: number
+  constructor(now: number) { this.lastMsgAt = now; this.lastFrameAt = now }
+  frame(now: number) { this.lastFrameAt = now }
+  message(now: number) { this.lastMsgAt = now }
+  /** Vuelve a contar desde ahora (al reconectar o mientras no hay audio que mandar). */
+  reset(now: number) { this.lastMsgAt = now }
+  silentFor(now: number) { return now - this.lastMsgAt }
+  check(now: number, open: boolean, buffered: number): WatchVerdict {
+    if (now - this.lastFrameAt > NO_AUDIO_MS) { this.reset(now); return 'no-audio' }
+    if (!open) return 'ok'
+    if (buffered > MAX_BUFFERED) return 'backlog'
+    if (now - this.lastMsgAt > STALL_MS) return 'stalled'
+    return 'ok'
+  }
+}
+
+/** Cuántas reconexiones van en la ventana; `null` si ya no se permite otra. */
+export function nextReconnect(times: number[], now: number): number[] | null {
+  const recent = times.filter(t => now - t < RECONNECT_WINDOW_MS)
+  return recent.length >= MAX_RECONNECTS ? null : [...recent, now]
+}
 
 export interface SonioxToken { text: string; is_final?: boolean; translation_status?: string; language?: string }
 export interface SonioxMessage { tokens?: SonioxToken[]; finished?: boolean; error_code?: number; error_type?: string; error_message?: string }
@@ -113,7 +149,8 @@ export interface StreamEngineOptions {
 }
 
 async function fetchToken(meetingId: string): Promise<{ apiKey: string; model: string }> {
-  const res = await fetch('/api/live/stt-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ meetingId }) })
+  // Con tiempo límite: una reconexión nunca debe quedarse esperando la llave para siempre.
+  const res = await fetch('/api/live/stt-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ meetingId }), signal: AbortSignal.timeout(10_000) })
   const data = await res.json().catch(() => ({})) as { apiKey?: string; model?: string; error?: string }
   if (!res.ok || !data.apiKey || !data.model) throw new Error(data.error ?? `HTTP ${res.status}`)
   return { apiKey: data.apiKey, model: data.model }
@@ -127,12 +164,23 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
   let ready = false
   let stopping = false
   let finished = false
-  let retried = false
   let terms: string[] = []
+  let reconnectTimes: number[] = []
+  let reconnecting = false
+  let audioStalled = false
+  let watch: ReturnType<typeof setInterval> | null = null
+  const watchdog = new StreamWatchdog(Date.now())
 
   // El audio empieza a guardarse ya; se manda en cuanto la conexión está lista.
   const tap = await startMeetingAudioTap(stream, {
     push(frame) {
+      watchdog.frame(Date.now())
+      if (audioStalled) {
+        audioStalled = false
+        cb.log('Audio: volvió a llegar el audio de la reunión')
+        cb.diag?.('audio-back')
+        if (!reconnecting) cb.status?.('ok')
+      }
       const buf = toPcm16(frame)
       if (ready && ws?.readyState === WebSocket.OPEN) ws.send(buf)
       else if (queue.length < QUEUE_MAX_FRAMES) queue.push(buf)
@@ -154,15 +202,24 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
     }
   }
 
+  function stopWatch() {
+    if (watch) clearInterval(watch)
+    watch = null
+  }
+
   function fail(reason: string) {
     if (stopping) return
     stopping = true
+    stopWatch()
     cb.log(`Streaming: ${reason}`)
+    cb.diag?.('fail', { reason })
     tap.stop()
     try { ws?.close() } catch { /**/ }
     turns.commit()
     opts.onFail(reason)
   }
+
+  let connectedOnce = false
 
   function connect(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -176,28 +233,92 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
         socket.send(JSON.stringify(config(token.model)))
         for (const buf of queue.splice(0)) socket.send(buf)
         ready = true
+        connectedOnce = true
+        watchdog.reset(Date.now())
         resolve()
       }
       socket.onmessage = (e: MessageEvent) => {
-        if (typeof e.data !== 'string') return
+        if (typeof e.data !== 'string' || ws !== socket) return
+        watchdog.message(Date.now())
         let msg: SonioxMessage
         try { msg = JSON.parse(e.data) } catch { return }
-        if (msg.error_code) { fail(`${msg.error_code} ${msg.error_type ?? ''} ${msg.error_message ?? ''}`.trim()); return }
+        if (msg.error_code) {
+          // Un error de Soniox a media reunión (p. ej. tiempo máximo del stream) se intenta reconectar.
+          const reason = `${msg.error_code} ${msg.error_type ?? ''} ${msg.error_message ?? ''}`.trim()
+          if (msg.error_code === 401 || msg.error_code === 402 || msg.error_code === 403) fail(reason)
+          else reconnect(`Soniox respondió ${reason}`)
+          return
+        }
         turns.handle(msg)
         if (msg.finished) finished = true
       }
       socket.onerror = () => { clearTimeout(timer); reject(new Error('error de conexión')) }
-      socket.onclose = () => {
+      socket.onclose = (e: CloseEvent) => {
         clearTimeout(timer)
+        if (ws !== socket) return
         ready = false
-        if (stopping || finished || ws !== socket) return
-        // Se cayó a media reunión: una reconexión con llave nueva; si no, al motor por tramos.
-        if (retried) { fail('se perdió la conexión'); return }
-        retried = true
-        cb.log('Streaming: reconectando…')
-        void fetchToken(opts.meetingId).then(t => { token = t; return connect() }).catch(err => fail(err instanceof Error ? err.message : String(err)))
+        // Sin una primera conexión, el arranque ya lanzó el error y el hook usa el motor por tramos.
+        if (stopping || finished || !connectedOnce) return
+        reconnect(`se cerró la conexión (código ${e.code})`)
       }
     })
+  }
+
+  /** Abre una conexión nueva con llave nueva; tras varias seguidas, pasa al motor por tramos. */
+  function reconnect(reason: string) {
+    if (stopping || reconnecting) return
+    const times = nextReconnect(reconnectTimes, Date.now())
+    if (!times) { fail(`${reason}; demasiadas reconexiones seguidas`); return }
+    reconnectTimes = times
+    reconnecting = true
+    cb.log(`Streaming: ${reason} → reconectando (${times.length} en 10 min)…`)
+    cb.diag?.('reconnect', { reason, n: times.length, audio: tap.state() })
+    cb.status?.('reconnecting')
+    const old = ws
+    ws = null // las respuestas y el cierre de la conexión vieja ya no cuentan
+    ready = false
+    try { old?.close() } catch { /**/ }
+    turns.commit() // lo ya reconocido pasa al historial; la conexión nueva empieza de cero
+    cb.preview({ text: '', tentative: '' })
+    cb.translationPreview?.({ text: '', tentative: '' })
+    const delay = Math.min(4000, 500 * 2 ** (times.length - 1))
+    setTimeout(() => {
+      if (stopping) { reconnecting = false; return }
+      fetchToken(opts.meetingId)
+        .then(t => { token = t; return connect() })
+        .then(() => {
+          reconnecting = false
+          cb.log('Streaming: reconectado')
+          cb.diag?.('reconnected', { n: reconnectTimes.length })
+          cb.status?.(audioStalled ? 'no-audio' : 'ok')
+        })
+        .catch(err => {
+          reconnecting = false
+          reconnect(`no se pudo reconectar (${err instanceof Error ? err.message : String(err)})`)
+        })
+    }, delay)
+  }
+
+  function startWatch() {
+    watch = setInterval(() => {
+      if (stopping) return
+      const now = Date.now()
+      const open = !!ws && ready && ws.readyState === WebSocket.OPEN
+      const verdict = watchdog.check(now, open && !reconnecting, ws?.bufferedAmount ?? 0)
+      if (verdict === 'no-audio') {
+        if (!audioStalled) {
+          audioStalled = true
+          cb.log(`Audio: dejó de llegar el audio de la reunión (${tap.state()}); intento reanudarlo`)
+          cb.diag?.('no-audio', { audio: tap.state() })
+          cb.status?.('no-audio')
+        }
+        void tap.resume()
+      } else if (verdict === 'backlog') {
+        reconnect(`el audio no sale (${Math.round((ws?.bufferedAmount ?? 0) / 1024)} KB en espera)`)
+      } else if (verdict === 'stalled') {
+        reconnect(`${Math.round(watchdog.silentFor(now) / 1000)} s sin respuesta de Soniox`)
+      }
+    }, WATCH_MS)
   }
 
   terms = await Promise.race([opts.terms().catch(() => []), new Promise<string[]>(r => setTimeout(() => r([]), TERMS_WAIT_MS))])
@@ -208,12 +329,15 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
     throw err
   }
   cb.log(`Streaming: conectado (${terms.length} términos de tus documentos)`)
+  cb.diag?.('connected', { terms: terms.length, audio: tap.state() })
+  startWatch()
 
   return {
     kind: 'stream',
     async stop() {
       if (stopping) return
       stopping = true
+      stopWatch()
       tap.stop()
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'finalize' }))
@@ -223,6 +347,7 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
       }
       turns.commit()
       try { ws?.close() } catch { /**/ }
+      cb.diag?.('stop', { reconnects: reconnectTimes.length })
       cb.preview({ text: '', tentative: '' })
       cb.translationPreview?.({ text: '', tentative: '' })
     },
