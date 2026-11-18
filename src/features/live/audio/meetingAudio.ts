@@ -180,7 +180,13 @@ export class OrderedDelivery<T> {
   }
 }
 
-export interface MeetingAudioTap { stop: () => void }
+export interface MeetingAudioTap {
+  stop: () => void
+  /** Reanuda el AudioContext si el navegador lo suspendió (p. ej. al cambiar el dispositivo de audio). */
+  resume: () => Promise<void>
+  /** Estado del AudioContext y de las pistas de audio, para el diagnóstico. */
+  state: () => string
+}
 
 /** Quien recibe el audio: el segmentador (tramos) o el stream de transcripción en vivo. */
 export interface AudioSink { push(frame: Float32Array): void; flush?(): void }
@@ -208,6 +214,13 @@ export async function startMeetingAudioTap(stream: MediaStream, sink: AudioSink)
       try { source.disconnect() } catch { /**/ }
       sink.flush?.()
       ctx.close().catch(() => {})
+    },
+    async resume() {
+      if (ctx.state !== 'running' && ctx.state !== 'closed') await ctx.resume().catch(() => {})
+    },
+    state() {
+      const tracks = stream.getAudioTracks().map(t => `${t.readyState}${t.muted ? '/silenciada' : ''}`).join(',') || 'sin pistas'
+      return `audio ${ctx.state} · pistas ${tracks}`
     },
   }
 }

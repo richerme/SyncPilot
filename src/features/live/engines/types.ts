@@ -4,6 +4,9 @@
 
 export type EngineKind = 'chunked' | 'stream'
 
+/** Salud del motor, para avisar en pantalla en vez de quedarse congelado en silencio. */
+export type EngineStatus = 'ok' | 'reconnecting' | 'no-audio'
+
 export interface LivePreview {
   /** Lo ya reconocido del turno en curso que todavía no pasa al historial. */
   text: string
@@ -24,6 +27,10 @@ export interface EngineCallbacks {
   /** Texto recién reconocido, para detectar el nombre lo antes posible. */
   heard(text: string): void
   log(msg: string): void
+  /** Cambió la salud del motor (reconectando, sin audio, o de nuevo bien). */
+  status?(s: EngineStatus): void
+  /** Evento de diagnóstico que se guarda con la reunión (conexión, cortes, reconexiones). */
+  diag?(event: string, data?: Record<string, unknown>): void
 }
 
 export interface MeetingEngine {

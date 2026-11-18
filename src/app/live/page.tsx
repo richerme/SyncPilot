@@ -306,6 +306,13 @@ export default function LivePage() {
                   {session.engineKind === 'stream' ? '⚡ Palabra por palabra' : 'Por tramos'}
                 </span>
               )}
+              {session.engineStatus !== 'ok' && (
+                <span role="status" aria-live="polite" className="text-xs px-2 py-1 rounded-full flex items-center gap-1.5"
+                  style={{ background: 'rgb(245 158 11/0.12)', color: '#F59E0B' }}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  {session.engineStatus === 'reconnecting' ? 'Reconectando la transcripción…' : 'No llega audio de la reunión'}
+                </span>
+              )}
             </>
           )}
           <Link href="/dashboard" className="text-xs px-3 py-1.5 rounded-lg"
