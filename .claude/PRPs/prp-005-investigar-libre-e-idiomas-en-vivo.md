@@ -148,3 +148,16 @@
   - el EN/ES del Copiloto;
   - compartir pantalla más de 5 minutos con SyncPilot tapado.
   - Después se lee el diagnóstico de esa reunión.
+
+## Ajuste del 19 nov: «Responder» contesta lo de ahora
+
+Pregunta del usuario antes del merge: cuando ya contestó al oír «Rick» y la plática siguió (otro tema, una interrupción o el mismo tema alargado), ¿el botón «Responder» contesta lo último con el contexto y los documentos?
+
+- **Antes:** sí se activaba, con toda la reunión, el resumen y los documentos activos, pero buscaba «la pregunta más reciente dirigida a Rick» y no sabía qué había contestado ya. Si después nadie le preguntaba nada nuevo, podía repetir la respuesta vieja.
+- **Ahora:** la ruta `/answer` lee las últimas 3 respuestas del Copiloto de esa reunión (`MeetingSuggestion` tipo `reply`, 700 caracteres cada una) y las manda como «YOUR EARLIER ANSWERS». El botón sin texto usa `BUTTON_ASK`:
+  - contesta lo más reciente que espera su respuesta;
+  - si cambiaron de tema, el tema nuevo;
+  - si alargaron el mismo, una respuesta actualizada;
+  - nunca repite una respuesta tal cual;
+  - si nadie le pregunta nada, propone lo más útil que puede aportar a lo que se habla.
+- **Pruebas:** `scripts/test-meeting-identity.ts --real` pasa 15 de 15, entre ellas 2 casos nuevos del botón: cambio de tema y tema alargado.

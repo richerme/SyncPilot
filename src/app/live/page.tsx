@@ -333,7 +333,7 @@ export default function LivePage() {
             {session.answers.length === 0 && !session.nameHeard && (
               <p className="text-center py-8 px-4 text-xs leading-relaxed" style={{ color: 'var(--color-text-muted)' }}>
                 {isActive
-                  ? <>Contesto en {copilotLangName} cuando alguien diga <strong className="text-white">«{COPILOT_NAME}»</strong> o cuando presiones <strong className="text-white">Responder</strong>. Con <strong className="text-white">Investigar</strong> te explico lo que se está hablando.</>
+                  ? <>Contesto en {copilotLangName} cuando alguien diga <strong className="text-white">«{COPILOT_NAME}»</strong> o cuando presiones <strong className="text-white">Responder</strong> (contesta lo que se está hablando ahora, sin repetir lo que ya te dije). Con <strong className="text-white">Investigar</strong> te explico lo que se está hablando.</>
                   : 'Inicia la sesión para usar el Copiloto.'}
               </p>
             )}
@@ -437,6 +437,7 @@ export default function LivePage() {
         {isActive && (
           <>
             <button onClick={() => session.askCopilot()} disabled={copilotBusy}
+              title="Contesta lo que se está hablando ahora, con toda la reunión y tus documentos activos"
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50"
               style={{ background: 'linear-gradient(135deg, rgb(99 102 241/0.2), rgb(168 85 247/0.2))', border: '1px solid rgb(99 102 241/0.4)', color: '#818CF8' }}>
               💬 Responder
