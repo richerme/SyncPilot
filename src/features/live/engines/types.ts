@@ -33,8 +33,20 @@ export interface EngineCallbacks {
   diag?(event: string, data?: Record<string, unknown>): void
 }
 
+/** Números del motor para el diagnóstico de rendimiento (PRP-005, fase 3). */
+export interface EngineStats {
+  /** Bytes de audio que el navegador aún no logra mandar (la subida no alcanza). */
+  buffered: number
+  /** Tramos guardados mientras se abre la conexión. */
+  queued: number
+  reconnects: number
+}
+
 export interface MeetingEngine {
   readonly kind: EngineKind
   /** Manda lo pendiente, espera las últimas respuestas y cierra. */
   stop(): Promise<void>
+  /** Cambia el idioma de la traducción sin cortar la reunión (solo stream: reabre la conexión). */
+  setTranslateTo?(lang: string | null): void
+  stats?(): EngineStats
 }

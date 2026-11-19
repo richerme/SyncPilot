@@ -20,7 +20,12 @@ const Schema = z.object({
   // Lo que todavía no está guardado en la base de datos: últimos fragmentos y el turno en curso.
   live:     z.string().max(20000).default(''),
   trigger:  z.enum(['button', 'name', 'typed']).default('button'),
+  // Idioma de la respuesta, elegido en IA en Vivo para esa reunión (PRP-005). Inglés por defecto.
+  answerLang: z.enum(['en', 'es']).default('en'),
 })
+
+// Las instrucciones (en el caché) piden inglés; esta línea al final de la conversación lo cambia.
+const SPANISH_ANSWER = `ANSWER LANGUAGE: write this answer in clear, natural, professional Spanish (Latin American), in first person as ${COPILOT_NAME}, with the same length and style rules. Keep standard SAP terms as they are (BAdI, IDoc, BAPI, CDS view, transport).`
 
 const RELEVANT_DOCS_CHARS  = 400_000
 
@@ -47,7 +52,7 @@ export async function POST(request: Request, { params }: RouteParams) {
 
   const parsed = Schema.safeParse(await request.json().catch(() => ({})))
   if (!parsed.success) return NextResponse.json({ error: 'Datos inválidos' }, { status: 400 })
-  const { question, live, trigger } = parsed.data
+  const { question, live, trigger, answerLang } = parsed.data
 
   const ai = getGenAI()
   const openRouterKey = process.env.OPENROUTER_API_KEY
@@ -59,7 +64,8 @@ export async function POST(request: Request, { params }: RouteParams) {
   const ask = question?.trim()
     ? question.trim()
     : `The most recent question or request addressed to ${COPILOT_NAME} (or still waiting for his answer) in the transcript.`
-  const conversation = copilotConversation({ meeting, brief: ctx.brief, transcript, trigger, ask })
+  const baseConversation = copilotConversation({ meeting, brief: ctx.brief, transcript, trigger, ask })
+  const conversation = answerLang === 'es' ? `${baseConversation}\n\n${SPANISH_ANSWER}` : baseConversation
   const base = { temperature: 0.3, maxOutputTokens: 500, thinkingConfig: NO_THINKING } // primera palabra en ~1 s
 
   // Proveedores en orden (10 nov 2026): Gemini (con caché si hay) y, si falla al abrir o en el primer

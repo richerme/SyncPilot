@@ -1,69 +1,21 @@
 'use client'
 
-import { useLiveSession, type CopilotAnswer, type MeetingContextInfo, type TranscriptSegment } from '@/features/live/hooks/useLiveSession'
+import { useLiveSession } from '@/features/live/hooks/useLiveSession'
 import { useLiveTranslation, useTranslatorSettings } from '@/features/live/hooks/useLiveTranslation'
 import { COPILOT_NAME } from '@/features/live/copilot/profile'
 import Link from 'next/link'
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import RecordingStatusBar from '@/components/layout/RecordingStatusBar'
+import LiveLanguageBar, { VOICE_LANGS } from '@/features/live/components/LiveLanguageBar'
+import { fmtDuration, TranscriptRow, TranslationRow, AnswerCard, MeetingContextCard } from '@/features/live/components/LiveCards'
 
-function fmtDuration(secs: number) {
-  const h = Math.floor(secs / 3600)
-  const m = Math.floor((secs % 3600) / 60).toString().padStart(2, '0')
-  const s = (secs % 60).toString().padStart(2, '0')
-  return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`
-}
-
-// Idioma en el que hablas tú (reconocimiento de voz del navegador). El audio de la
+// Idioma en el que hablas tú (reconocimiento de voz del navegador, VOICE_LANGS). El audio de la
 // reunión se detecta solo; este ajuste es únicamente para tu micrófono.
-const VOICE_LANGS = [
-  { code: 'en-US', label: 'English' },
-  { code: 'es-MX', label: 'Español' },
-] as const
 const VOICE_LANG_KEY = 'syncpilot_voice_lang'
 
-const TRIGGER_LABEL: Record<CopilotAnswer['trigger'], string> = {
-  name: 'Te nombraron', button: 'Responder', typed: 'Tu pregunta',
-}
-
-// Colores de speaker
-const SPEAKER_STYLES = {
-  me:      { color: '#818CF8', label: 'Tú' },       // Índigo (voz propia)
-  meeting: { color: '#e2e8f0', label: 'Reunión' },  // Blanco (audio de reunión)
-  null:    { color: '#e2e8f0', label: '' },
-}
-
-// Cada fila memoizada por separado: al llegar un fragmento nuevo solo se pinta ese
-// (y el anterior, que deja de ser el último). En reuniones de 1-2 h hay cientos de
-// filas y re-pintarlas todas en cada fragmento era lo que pesaba.
-const TranscriptRow = memo(function TranscriptRow({ seg, isLast }: { seg: TranscriptSegment; isLast: boolean }) {
-  const sp = SPEAKER_STYLES[seg.speaker ?? 'null'] ?? SPEAKER_STYLES.meeting
-  return (
-    <div className={`transcript-line ${isLast ? 'active' : ''}`}>
-      <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-        {fmtDuration(Math.round(seg.start_ms / 1000))}
-      </span>
-      {seg.speaker && <span className="text-xs font-semibold flex-shrink-0" style={{ color: sp.color }}>{sp.label}:</span>}
-      <span className="text-sm break-words min-w-0" style={{ color: sp.color }}>{seg.text}</span>
-    </div>
-  )
-})
-
-// Panel derecho: la misma conversación, traducida, con el mismo tiempo y quién habla.
-const TranslationRow = memo(function TranslationRow({ seg, translated, isLast }: { seg: TranscriptSegment; translated: string | undefined; isLast: boolean }) {
-  const sp = SPEAKER_STYLES[seg.speaker ?? 'null'] ?? SPEAKER_STYLES.meeting
-  return (
-    <div className={`transcript-line ${isLast ? 'active' : ''}`}>
-      <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-        {fmtDuration(Math.round(seg.start_ms / 1000))}
-      </span>
-      {seg.speaker && <span className="text-xs font-semibold flex-shrink-0" style={{ color: sp.color }}>{sp.label}:</span>}
-      {translated
-        ? <span className="text-sm break-words min-w-0" style={{ color: '#67E8F9' }}>{translated}</span>
-        : <span className="text-xs italic" style={{ color: 'var(--color-text-muted)' }}>Traduciendo…</span>}
-    </div>
-  )
-})
+// En la pantalla solo se pintan los últimos fragmentos (la reunión completa queda en Reuniones):
+// así pintar cada palabra cuesta lo mismo en el minuto 5 que en la hora 2 (PRP-005, fase 3).
+const ROW_WINDOW = 300
 
 /** Mantiene un panel abajo mientras llega texto, salvo que el usuario haya subido a leer. */
 function useStickToBottom(deps: unknown[]) {
@@ -84,109 +36,6 @@ function useStickToBottom(deps: unknown[]) {
   return { ref, onScroll }
 }
 
-// «Verificado en internet» (PRP-004). El resultado se muestra tal cual, con sus fuentes y las
-// sugerencias de Google: así lo piden los términos del grounding con Google Search.
-function ResearchBlock({ research }: { research: NonNullable<CopilotAnswer['research']> }) {
-  if (research.status === 'loading') {
-    return <p className="text-xs animate-pulse" style={{ color: '#67E8F9' }}>🔎 Buscando en internet (solo la pregunta técnica, sin datos de la reunión)…</p>
-  }
-  if (research.status === 'error') return <p className="text-xs" style={{ color: '#FBBF24' }}>{research.error}</p>
-  return (
-    <div className="rounded-lg p-2.5 space-y-1.5" style={{ background: 'rgb(34 211 238/0.07)', border: '1px solid rgb(34 211 238/0.3)' }}>
-      <p className="text-[11px] font-semibold" style={{ color: '#67E8F9' }}>
-        Verificado en internet{research.ms ? ` · ${(research.ms / 1000).toFixed(1)} s` : ''}
-      </p>
-      <p className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>Búsqueda: «{research.query}»</p>
-      <p className="text-sm text-white leading-relaxed whitespace-pre-wrap">{research.text}</p>
-      {!!research.sources?.length && (
-        <ul className="space-y-0.5">
-          {research.sources.map(s => (
-            <li key={s.url} className="text-xs truncate">
-              <a href={s.url} target="_blank" rel="noopener noreferrer" className="underline" style={{ color: '#818CF8' }}>{s.title}</a>
-              {s.domain && s.domain !== s.title.toLowerCase() && <span style={{ color: 'var(--color-text-muted)' }}> · {s.domain}</span>}
-            </li>
-          ))}
-        </ul>
-      )}
-      {research.suggestionsHtml && (
-        // Sin scripts; los enlaces abren en otra pestaña.
-        <iframe title="Sugerencias de Google" sandbox="allow-popups allow-popups-to-escape-sandbox"
-          srcDoc={`<base target="_blank">${research.suggestionsHtml}`} className="w-full h-16 border-0 rounded" />
-      )}
-    </div>
-  )
-}
-
-const AnswerCard = memo(function AnswerCard({ answer, onResearch }: { answer: CopilotAnswer; onResearch: (a: CopilotAnswer) => void }) {
-  const [copied, setCopied] = useState(false)
-  const streaming = answer.status === 'streaming'
-  return (
-    <div className="suggestion-card type-reply animate-slide-up space-y-1.5">
-      <p className="text-[11px] line-clamp-2" style={{ color: 'var(--color-text-muted)' }}>
-        {TRIGGER_LABEL[answer.trigger]}{answer.question ? ` · ${answer.question}` : ''}
-      </p>
-      <p className="text-sm text-white leading-relaxed whitespace-pre-wrap"
-        style={answer.status === 'error' ? { color: '#F87171' } : undefined}>
-        {answer.text || (streaming ? 'Thinking…' : '')}
-        {streaming && answer.text && <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle animate-pulse bg-indigo-300" />}
-      </p>
-      {answer.status === 'done' && (
-        <div className="flex justify-end gap-3">
-          {(!answer.research || answer.research.status === 'error') && (
-            <button onClick={() => onResearch(answer)} title="Busca en internet solo la pregunta técnica, sin nombres ni datos de la reunión"
-              className="text-xs opacity-70 hover:opacity-100 transition-opacity" style={{ color: '#67E8F9' }}>
-              🔎 Investigar
-            </button>
-          )}
-          <button onClick={() => { navigator.clipboard.writeText(answer.text); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
-            className="text-xs opacity-60 hover:opacity-100 transition-opacity" style={{ color: '#818CF8' }}>
-            {copied ? 'Copiado ✓' : 'Copiar ↗'}
-          </button>
-        </div>
-      )}
-      {answer.research && <ResearchBlock research={answer.research} />}
-    </div>
-  )
-})
-
-// Lo que el Copiloto tiene cargado de esta reunión: documentos completos y de qué trata.
-function MeetingContextCard({ ctx, defaultOpen }: { ctx: MeetingContextInfo; defaultOpen: boolean }) {
-  const [open, setOpen] = useState<boolean | null>(null)
-  const isOpen = open ?? defaultOpen
-  const kchars = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
-  if (ctx.status === 'loading') {
-    return <div className="p-3 rounded-lg text-xs animate-pulse" style={{ background: 'rgb(99 102 241/0.08)', border: '1px solid rgb(99 102 241/0.25)', color: '#A5B4FC' }}>
-      📄 Cargando tus documentos para esta reunión…
-    </div>
-  }
-  if (ctx.status === 'error') {
-    return <div className="p-3 rounded-lg text-xs" style={{ background: 'rgb(245 158 11/0.08)', border: '1px solid rgb(245 158 11/0.3)', color: '#FBBF24' }}>
-      No se pudo preparar el contexto. El Copiloto buscará en tus documentos al responder.
-    </div>
-  }
-  if (!ctx.docs.length) {
-    return <p className="p-3 rounded-lg text-xs" style={{ background: 'var(--color-surface)', color: 'var(--color-text-muted)' }}>
-      Sin documentos activos. Súbelos en <Link href="/documents" className="underline">Documentos</Link> para que el Copiloto los use.
-    </p>
-  }
-  return (
-    <div className="rounded-lg text-xs" style={{ background: 'rgb(99 102 241/0.08)', border: '1px solid rgb(99 102 241/0.25)' }}>
-      <button onClick={() => setOpen(!isOpen)} className="w-full flex items-center justify-between gap-2 p-3 text-left" aria-expanded={isOpen}>
-        <span className="font-semibold" style={{ color: '#A5B4FC' }}>📄 Contexto de la reunión · {ctx.docs.length} doc{ctx.docs.length > 1 ? 's' : ''} completos</span>
-        <span style={{ color: 'var(--color-text-muted)' }}>{isOpen ? '▲' : '▼'}</span>
-      </button>
-      {isOpen && (
-        <div className="px-3 pb-3 space-y-2">
-          <ul className="space-y-0.5" style={{ color: 'var(--color-text-secondary)' }}>
-            {ctx.docs.map(d => <li key={d.name} className="truncate">· {d.name} <span style={{ color: 'var(--color-text-muted)' }}>({kchars(d.chars)} caracteres)</span></li>)}
-          </ul>
-          {ctx.brief && <p className="whitespace-pre-wrap leading-relaxed text-white/90">{ctx.brief}</p>}
-        </div>
-      )}
-    </div>
-  )
-}
-
 export default function LivePage() {
   const session = useLiveSession()
   const [customPrompt, setCustomPrompt] = useState('')
@@ -195,9 +44,12 @@ export default function LivePage() {
   const [voiceLang,    setVoiceLang]    = useState<string>('en-US')
   const [meetingTitle, setMeetingTitle] = useState('')
 
-  // Traducción a la derecha de la transcripción: solo si está activa en
-  // Voice AI Tools → Live Translator (si se cambia allá, se aplica aquí al momento).
-  const translator = useTranslatorSettings()
+  // Traducción a la derecha de la transcripción: el predeterminado viene de Voice AI Tools → Live
+  // Translator; lo que se cambia aquí vale solo para esta reunión (PRP-005, decisión 3b).
+  const translatorDefault = useTranslatorSettings()
+  const [translatorOverride, setTranslatorOverride] = useState<{ enabled: boolean; lang: string } | null>(null)
+  const translator = translatorOverride ?? translatorDefault
+  const [showAllRows, setShowAllRows] = useState(false)
   // Con el motor en streaming la traducción llega junto con la transcripción; con el de
   // respaldo (tramos) se traduce aquí el texto ya reconocido.
   const streamTranslates = session.engineKind === 'stream'
@@ -234,6 +86,25 @@ export default function LivePage() {
     try { localStorage.setItem(VOICE_LANG_KEY, code) } catch { /* ignore */ }
   }
 
+  // Cambios a media reunión: solo para esta reunión, no tocan los predeterminados (decisión 3b).
+  function changeTranslatorLang(lang: string) {
+    setTranslatorOverride({ enabled: true, lang })
+    if (session.status === 'active') session.setTranslationLang(lang)
+  }
+  function toggleTranslator() {
+    setTranslatorOverride({ enabled: !translator.enabled, lang: translator.lang })
+  }
+  function changeLiveVoiceLang(code: string) {
+    setVoiceLang(code)
+    session.setVoiceLang(code)
+  }
+  function newSession() {
+    session.resetSession()
+    setTranslatorOverride(null)
+    setShowAllRows(false)
+    try { setVoiceLang(localStorage.getItem(VOICE_LANG_KEY) ?? 'en-US') } catch { /* ignore */ }
+  }
+
   async function handleAsk() {
     const text = customPrompt.trim()
     setCustomPrompt('')
@@ -244,8 +115,11 @@ export default function LivePage() {
   const isIdle    = session.status === 'idle'
   const isDone    = session.status === 'done'
   const isLoading = session.status === 'starting' || session.status === 'ending'
-  const copilotBusy = lastAnswer?.status === 'streaming'
-  const lastIdx = session.transcript.length - 1
+  const copilotBusy = session.answers.some(a => a.trigger !== 'context' && a.status === 'streaming')
+  const hiddenRows = showAllRows ? 0 : Math.max(0, session.transcript.length - ROW_WINDOW)
+  const visibleRows = hiddenRows ? session.transcript.slice(hiddenRows) : session.transcript
+  const lastIdx = visibleRows.length - 1
+  const copilotLangName = session.copilotLang === 'es' ? 'español' : 'inglés'
 
   return (
     <div className="h-screen flex flex-col overflow-hidden"
@@ -274,11 +148,11 @@ export default function LivePage() {
               📄 {docCount} doc{docCount > 1 ? 's' : ''}
             </span>
           )}
-          {translator.enabled && (
-            <span className="text-xs px-2 py-0.5 rounded-full font-medium flex items-center gap-1"
-              style={{ background: 'rgba(6,182,212,0.15)', color: '#06B6D4', border: '1px solid rgba(6,182,212,0.3)' }}>
-              🌐 Trad. {translator.lang.toUpperCase()}
-            </span>
+          {!isDone && (
+            <LiveLanguageBar
+              translatorEnabled={translator.enabled} translatorLang={translator.lang}
+              onToggleTranslator={toggleTranslator} onTranslatorLang={changeTranslatorLang}
+              voiceLang={isActive ? voiceLang : undefined} onVoiceLang={isActive ? changeLiveVoiceLang : undefined} />
           )}
 
           {isActive && (
@@ -355,7 +229,15 @@ export default function LivePage() {
                 </p>
               </div>
             ) : (
-              session.transcript.map((seg, i) => <TranscriptRow key={seg.id} seg={seg} isLast={i === lastIdx} />)
+              <>
+                {hiddenRows > 0 && (
+                  <button onClick={() => setShowAllRows(true)} className="w-full text-xs py-1.5 rounded-lg"
+                    style={{ background: 'var(--color-surface)', color: 'var(--color-text-muted)' }}>
+                    Mostrar los {hiddenRows.toLocaleString()} fragmentos anteriores
+                  </button>
+                )}
+                {visibleRows.map((seg, i) => <TranscriptRow key={seg.id} seg={seg} isLast={i === lastIdx} />)}
+              </>
             )}
 
             {/* Lo que se está diciendo en la reunión: lo ya reconocido en blanco; lo que aún puede cambiar, tenue */}
@@ -396,7 +278,7 @@ export default function LivePage() {
                   <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Aquí aparecerá la traducción de la reunión.</p>
                 </div>
               ) : (
-                session.transcript.map((seg, i) => (
+                visibleRows.map((seg, i) => (
                   <TranslationRow key={seg.id} seg={seg} translated={session.segmentTranslations[seg.id] ?? translations[seg.id]} isLast={i === lastIdx} />
                 ))
               )}
@@ -427,7 +309,17 @@ export default function LivePage() {
                 </svg>
               </div>
               <h2 className="text-sm font-semibold text-white">Copiloto IA</h2>
-              <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold" style={{ background: 'rgb(99 102 241/0.15)', color: '#818CF8' }}>EN</span>
+              {/* Idioma de sus respuestas, solo para esta pantalla (PRP-005, decisión 4b) */}
+              <div role="group" aria-label="Idioma de las respuestas del Copiloto" className="flex rounded overflow-hidden text-[10px] font-semibold"
+                style={{ border: '1px solid rgb(99 102 241/0.3)' }}>
+                {(['en', 'es'] as const).map(l => (
+                  <button key={l} onClick={() => session.setCopilotLang(l)} aria-pressed={session.copilotLang === l}
+                    title={l === 'en' ? 'Responde en inglés' : 'Responde en español'} className="px-1.5 py-0.5"
+                    style={session.copilotLang === l ? { background: 'rgb(99 102 241/0.3)', color: '#C7D2FE' } : { color: 'var(--color-text-muted)' }}>
+                    {l.toUpperCase()}
+                  </button>
+                ))}
+              </div>
             </div>
             {session.answers.length > 0 && (
               <button onClick={session.clearAnswers} className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
@@ -441,7 +333,7 @@ export default function LivePage() {
             {session.answers.length === 0 && !session.nameHeard && (
               <p className="text-center py-8 px-4 text-xs leading-relaxed" style={{ color: 'var(--color-text-muted)' }}>
                 {isActive
-                  ? <>Contesto en inglés cuando alguien diga <strong className="text-white">«{COPILOT_NAME}»</strong> o cuando presiones <strong className="text-white">Responder</strong>.</>
+                  ? <>Contesto en {copilotLangName} cuando alguien diga <strong className="text-white">«{COPILOT_NAME}»</strong> o cuando presiones <strong className="text-white">Responder</strong>. Con <strong className="text-white">Investigar</strong> te explico lo que se está hablando.</>
                   : 'Inicia la sesión para usar el Copiloto.'}
               </p>
             )}
@@ -456,7 +348,7 @@ export default function LivePage() {
 
           {isActive && (
             <div className="p-3 border-t space-y-2" style={{ borderColor: 'var(--color-surface-border)' }}>
-              <p className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Pregúntale al Copiloto (responde en inglés)</p>
+              <p className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Pregúntale al Copiloto (responde en {copilotLangName})</p>
               <div className="flex gap-2">
                 <input type="text" value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && handleAsk()}
@@ -549,6 +441,12 @@ export default function LivePage() {
               style={{ background: 'linear-gradient(135deg, rgb(99 102 241/0.2), rgb(168 85 247/0.2))', border: '1px solid rgb(99 102 241/0.4)', color: '#818CF8' }}>
               💬 Responder
             </button>
+            <button onClick={() => void session.investigateContext()} disabled={session.contextBusy}
+              title="Explica lo último que se está hablando, en el idioma de la reunión, y lo busca en internet (sin nombres ni datos de la reunión)"
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50"
+              style={{ background: 'rgba(6,182,212,0.12)', border: '1px solid rgba(6,182,212,0.4)', color: '#67E8F9' }}>
+              🔎 {session.contextBusy ? 'Investigando…' : 'Investigar'}
+            </button>
             <button onClick={session.endSession}
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all"
               style={{ background: 'rgb(239 68 68/0.2)', border: '1px solid rgb(239 68 68/0.4)', color: '#EF4444' }}>
@@ -563,7 +461,7 @@ export default function LivePage() {
             <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
               ✓ Sesión finalizada · {session.wordCount.toLocaleString()} palabras · {fmtDuration(session.duration)}
             </p>
-            <button onClick={session.resetSession} className="text-sm px-5 py-2 rounded-lg font-semibold"
+            <button onClick={newSession} className="text-sm px-5 py-2 rounded-lg font-semibold"
               style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}>
               Nueva sesión
             </button>

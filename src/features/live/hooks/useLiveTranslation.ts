@@ -61,15 +61,16 @@ export function useLiveTranslation({ enabled, lang, transcript, meetingInterim }
   const langRef      = useRef(lang)
   const interimSeqRef = useRef(0)
 
-  // Cambio de idioma o se apagó: se empieza de cero (y se ponen al día los últimos).
+  // Cambio de idioma a media reunión (PRP-005): lo ya traducido se queda como estaba y los últimos
+  // CATCH_UP_SEGMENTS se vuelven a pedir en el idioma nuevo, para que la lectura siga.
   useEffect(() => {
-    if (langRef.current === lang && enabled) return
+    if (langRef.current === lang) return
     langRef.current = lang
     cacheRef.current.clear()
-    requestedRef.current.clear()
-    setTranslations({})
+    for (const seg of transcript.slice(-CATCH_UP_SEGMENTS)) requestedRef.current.delete(seg.id)
     setInterimTranslation(null)
-  }, [lang, enabled])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lang])
 
   // Fragmentos nuevos (los cerrados por turno suelen salir del caché del preview).
   useEffect(() => {

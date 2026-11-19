@@ -5,9 +5,15 @@ import { COPILOT_NAME, NAME_PATTERN } from '../copilot/profile'
 import { startChunkedEngine } from '../engines/chunkedEngine'
 import { startStreamEngine } from '../engines/streamEngine'
 import type { EngineCallbacks, EngineKind, EngineStatus, LivePreview, MeetingEngine } from '../engines/types'
-import { streamAnswer, researchAnswer, copilotErrorText, CopilotError, type CopilotAnswer, type CopilotTrigger } from '../copilot/streamAnswer'
+import {
+  streamAnswer, researchAnswer, researchContext, researchQuery, copilotErrorText, CopilotError,
+  type CopilotAnswer, type CopilotTrigger, type CopilotLang,
+} from '../copilot/streamAnswer'
+import { after } from '../utils/ticker'
+import { startPerfMonitor } from '../diag/perfMonitor'
+import { recordingBacklogBytes } from '@/features/recording/store/recordingStore'
 
-export type { CopilotAnswer }
+export type { CopilotAnswer, CopilotLang }
 
 export interface TranscriptSegment {
   id: string
@@ -39,7 +45,9 @@ declare global {
 }
 
 const DURATION_TICK_MS      = 1000
-const MEMORY_TICK_MS        = 5 * 60_000 // memoria del navegador al registro y al diagnóstico
+// La vista previa (palabras que aún pueden cambiar) se pinta como máximo 10 veces por segundo: antes
+// cada mensaje de Soniox redibujaba toda la pantalla (PRP-005, fase 3).
+const UI_FLUSH_MS           = 100
 // Cuando dicen tu nombre, el Copiloto espera a que terminen la pregunta (fin de
 // turno); si siguen hablando, contesta a los 8 s con lo que lleven.
 const NAME_FALLBACK_MS      = 8000
@@ -67,10 +75,13 @@ export function useLiveSession() {
   const [nameHeard,      setNameHeard]      = useState(false)   // te nombraron; esperando la pregunta
   const [debugLogs,      setDebugLogs]      = useState<string[]>([])
   const [audioTracksOk,  setAudioTracksOk]  = useState(false)
+  // Idioma de las respuestas del Copiloto, solo para esta pantalla (PRP-005, decisión 4b). Inglés por defecto.
+  const [copilotLang,    setCopilotLangState] = useState<CopilotLang>('en')
+  const [contextBusy,    setContextBusy]    = useState(false)   // «Investigar» libre en curso
 
   const meetingIdRef      = useRef<string | null>(null)
   const timerRef          = useRef<ReturnType<typeof setInterval> | null>(null)
-  const memTimerRef       = useRef<ReturnType<typeof setInterval> | null>(null) // memoria del navegador cada 5 min (diagnóstico)
+  const perfStopRef       = useRef<(() => void) | null>(null)  // monitor de rendimiento (diagnóstico cada minuto)
   const sessionStartRef   = useRef<number>(0)
   const transcriptRef     = useRef<TranscriptSegment[]>([])
   const wordCountRef      = useRef(0)
@@ -85,7 +96,12 @@ export function useLiveSession() {
   const translateToRef    = useRef<string | null>('es')
   const turnTextRef       = useRef<string>('')                 // todo lo dicho en el turno actual
   const nameArmedRef      = useRef<number | null>(null)
-  const nameTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const nameTimerRef      = useRef<(() => void) | null>(null)  // cancela la espera de 8 s (reloj del Worker)
+  const copilotLangRef    = useRef<CopilotLang>('en')
+  const contextBusyRef    = useRef(false)
+  const uiPendingRef      = useRef<{ interim?: string; tentative?: string; translation?: LivePreview | null } | null>(null)
+  const uiTimerRef        = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const uiSyncRef         = useRef(false)                      // tras cerrar un fragmento, la vista previa se limpia al momento
   const lastNameAnswerRef = useRef(0)
   const copilotBusyRef    = useRef(false)
 
@@ -119,8 +135,9 @@ export function useLiveSession() {
       recognitionRef.current?.abort()
       stopAllStreams()
       if (timerRef.current)     clearInterval(timerRef.current)
-      if (memTimerRef.current)  clearInterval(memTimerRef.current)
-      if (nameTimerRef.current) clearTimeout(nameTimerRef.current)
+      perfStopRef.current?.()
+      nameTimerRef.current?.()
+      if (uiTimerRef.current) clearTimeout(uiTimerRef.current)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -193,7 +210,7 @@ export function useLiveSession() {
     const update = (patch: Partial<CopilotAnswer>) => setAnswers(prev => prev.map(a => (a.id === id ? { ...a, ...patch } : a)))
     setAnswers(prev => [...prev, { id, trigger, question: question?.trim() || null, text: '', status: 'streaming' }])
     try {
-      const text = await streamAnswer(meetingIdRef.current, { question, live: liveForCopilot(), trigger }, t => update({ text: t }))
+      const text = await streamAnswer(meetingIdRef.current, { question, live: liveForCopilot(), trigger, answerLang: copilotLangRef.current }, t => update({ text: t }))
       update({ text: text || 'No answer was generated.', status: 'done' })
     } catch (err) {
       addLog(`Copiloto: ${err instanceof Error ? err.message : String(err)}`)
@@ -206,14 +223,16 @@ export function useLiveSession() {
   function armName() {
     nameArmedRef.current = Date.now()
     setNameHeard(true)
-    if (nameTimerRef.current) clearTimeout(nameTimerRef.current)
-    nameTimerRef.current = setTimeout(fireName, NAME_FALLBACK_MS)
+    nameTimerRef.current?.()
+    // Reloj del Worker: con la pestaña tapada, setTimeout de 8 s podía tardar hasta un minuto.
+    nameTimerRef.current = after(NAME_FALLBACK_MS, fireName)
   }
 
   function fireName() {
     if (nameArmedRef.current === null) return
     nameArmedRef.current = null
-    if (nameTimerRef.current) clearTimeout(nameTimerRef.current)
+    nameTimerRef.current?.()
+    nameTimerRef.current = null
     setNameHeard(false)
     lastNameAnswerRef.current = Date.now()
     const question = `${turnTextRef.current} ${meetingBufferRef.current}`.trim().slice(-800)
@@ -224,15 +243,41 @@ export function useLiveSession() {
   // ─────────────────────────────────────────────────────────
   // Audio de la reunión → motor de transcripción → vista previa + historial
   // ─────────────────────────────────────────────────────────
+  /** Pinta la vista previa: al momento justo después de cerrar un fragmento; si no, máx. 10 veces por segundo. */
+  function queuePreview(patch: { interim?: string; tentative?: string; translation?: LivePreview | null }) {
+    uiPendingRef.current = { ...uiPendingRef.current, ...patch }
+    if (uiSyncRef.current) { flushPreview(); return }
+    if (!uiTimerRef.current) uiTimerRef.current = setTimeout(flushPreview, UI_FLUSH_MS)
+  }
+
+  function flushPreview() {
+    if (uiTimerRef.current) { clearTimeout(uiTimerRef.current); uiTimerRef.current = null }
+    const p = uiPendingRef.current
+    uiPendingRef.current = null
+    if (!p) return
+    if (p.interim !== undefined) setMeetingInterim(p.interim)
+    if (p.tentative !== undefined) setMeetingTentative(p.tentative)
+    if (p.translation !== undefined) setLiveTranslation(p.translation)
+  }
+
+  /** Borra la vista previa al momento (al terminar o reiniciar la sesión). */
+  function clearPreview() {
+    uiPendingRef.current = { interim: '', tentative: '', translation: null }
+    flushPreview()
+  }
+
   const engineCallbacks: EngineCallbacks = {
     preview(p) {
+      // El texto para el Copiloto se actualiza siempre al momento; solo la pantalla espera.
       meetingBufferRef.current = `${p.text} ${p.tentative.replace(/…/g, ' ')}`.replace(/\s+/g, ' ').trim()
-      setMeetingInterim(p.text)
-      setMeetingTentative(p.tentative)
+      queuePreview({ interim: p.text, tentative: p.tentative })
     },
-    translationPreview(p) { setLiveTranslation(p.text || p.tentative ? p : null) },
+    translationPreview(p) { queuePreview({ translation: p.text || p.tentative ? p : null }) },
     commit(text, translation) {
       turnTextRef.current = `${turnTextRef.current} ${text}`.trim()
+      // Lo que sigue en este mismo mensaje (vista previa sin el texto cerrado) se pinta junto con el fragmento.
+      uiSyncRef.current = true
+      queueMicrotask(() => { uiSyncRef.current = false })
       addSegment(text, 'meeting', translation)
     },
     amendTranslation(text) {
@@ -244,8 +289,10 @@ export function useLiveSession() {
       turnTextRef.current = ''
     },
     heard(text) {
+      // Solo se anota cuando aparece tu nombre: anotar cada frase redibujaba la pantalla una vez más.
+      if (!NAME_PATTERN.test(text)) return
       addLog(`Reunión: "${text.slice(0, 80)}"`)
-      if (NAME_PATTERN.test(text) && nameArmedRef.current === null && Date.now() - lastNameAnswerRef.current > NAME_COOLDOWN_MS) armName()
+      if (nameArmedRef.current === null && Date.now() - lastNameAnswerRef.current > NAME_COOLDOWN_MS) armName()
     },
     log: addLog,
     status: setEngineStatus,
@@ -398,12 +445,17 @@ export function useLiveSession() {
       launchSpeechRecognition(voiceLang)
       await launchMeetingCapture()
 
-      timerRef.current = setInterval(() => setDuration(d => d + 1), DURATION_TICK_MS)
-      memTimerRef.current = setInterval(() => {
-        const mb = heapMb()
-        if (mb !== null) addLog(`Memoria: ${mb} MB · ${transcriptRef.current.length} renglones`)
-        sendDiag('memory')
-      }, MEMORY_TICK_MS)
+      // Desde la hora de inicio: con la pestaña tapada el reloj se frena y sumar 1 por tic se atrasaba.
+      timerRef.current = setInterval(() => setDuration(Math.floor((Date.now() - sessionStartRef.current) / 1000)), DURATION_TICK_MS)
+      perfStopRef.current = startPerfMonitor({
+        send: (event, data) => sendDiag(event, data),
+        engineStats: () => engineRef.current?.stats?.(),
+        recordingBacklogBytes,
+        displaySurface: () => {
+          const settings = displayStreamRef.current?.getVideoTracks()[0]?.getSettings() as (MediaTrackSettings & { displaySurface?: string }) | undefined
+          return settings?.displaySurface ?? null
+        },
+      })
       setStatus('active')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error al iniciar'
@@ -428,17 +480,18 @@ export function useLiveSession() {
     engineRef.current = null
     displayStreamRef.current?.getTracks().forEach(t => t.stop())
     displayStreamRef.current = null
-    if (nameTimerRef.current) clearTimeout(nameTimerRef.current)
+    nameTimerRef.current?.()
+    nameTimerRef.current = null
     nameArmedRef.current = null
     setNameHeard(false)
     setIsListening(false)
     setInterimText('')
     engineCallbacks.preview(EMPTY_PREVIEW)
-    setLiveTranslation(null)
+    clearPreview()
     setEngineStatus('ok')
     if (timerRef.current) clearInterval(timerRef.current)
-    if (memTimerRef.current) clearInterval(memTimerRef.current)
-    memTimerRef.current = null
+    perfStopRef.current?.()
+    perfStopRef.current = null
 
     if (meetingIdRef.current) {
       await fetch(`/api/meetings/${meetingIdRef.current}`, {
@@ -480,9 +533,88 @@ export function useLiveSession() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /**
+   * «Investigar» libre (PRP-005): sin pregunta. Primero los últimos puntos de la reunión en el idioma que
+   * se habla (sin internet, ~1-2 s) y después la búsqueda de su tema técnico, contestada en ese idioma.
+   */
+  const investigateContext = useCallback(async () => {
+    const meetingId = meetingIdRef.current
+    if (!meetingId || contextBusyRef.current) return
+    if (!transcriptRef.current.length && !meetingBufferRef.current.trim()) {
+      setError('Todavía no hay conversación que investigar.')
+      setTimeout(() => setError(null), 3000)
+      return
+    }
+    contextBusyRef.current = true
+    setContextBusy(true)
+    const id = crypto.randomUUID()
+    const update = (patch: Partial<CopilotAnswer>) => setAnswers(prev => prev.map(a => (a.id === id ? { ...a, ...patch } : a)))
+    setAnswers(prev => [...prev, { id, trigger: 'context', question: null, text: '', status: 'streaming' }])
+    try {
+      const c = await researchContext(meetingId, liveForCopilot())
+      update({
+        status: 'done', points: c.points, text: c.points.join('\n'),
+        research: c.query ? { status: 'loading' } : { status: 'error', error: 'No había un tema técnico que buscar en internet: arriba tienes los últimos puntos.' },
+      })
+      addLog(`Investigar libre: ${c.points.length} puntos (${c.language})${c.query ? ` · «${c.query}»` : ''}`)
+      if (c.query) {
+        try {
+          const r = await researchQuery(meetingId, c.query, c.language)
+          update({ research: { status: 'done', ...r } })
+        } catch (err) {
+          update({ research: { status: 'error', error: err instanceof CopilotError && err.forUser ? err.message : 'No se pudo buscar en internet. Intenta de nuevo.' } })
+        }
+      }
+    } catch (err) {
+      addLog(`Investigar libre: ${err instanceof Error ? err.message : String(err)}`)
+      update({ status: 'error', text: err instanceof CopilotError && err.forUser ? err.message : 'No se pudo investigar. Intenta de nuevo.' })
+    } finally {
+      contextBusyRef.current = false
+      setContextBusy(false)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** Idioma de la traducción a media reunión (solo para esta reunión, decisión 3b). Misma reunión, mismo motor. */
+  const setTranslationLang = useCallback((lang: string) => {
+    if (translateToRef.current === lang) return
+    translateToRef.current = lang
+    engineRef.current?.setTranslateTo?.(lang)
+    addLog(`Traducción: ahora a ${lang}`)
+    sendDiag('translate-lang', { lang })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** «Idioma de tu voz» a media reunión: reinicia solo el reconocimiento de tu micrófono. */
+  const setVoiceLang = useCallback((lang: string) => {
+    const old = recognitionRef.current
+    if (!old || !shouldRestartRef.current) return
+    let launched = false
+    const launch = () => {
+      if (launched || !shouldRestartRef.current) return
+      launched = true
+      launchSpeechRecognition(lang)
+    }
+    old.onresult = null
+    old.onend = launch // el nuevo arranca cuando el anterior terminó de cerrarse
+    setInterimText('')
+    try { old.abort() } catch { launch() }
+    after(1500, launch)
+    addLog(`Tu voz: ahora en ${lang}`)
+    sendDiag('voice-lang', { lang })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** Idioma de las respuestas del Copiloto (decisión 4b); aplica desde la siguiente respuesta. */
+  const setCopilotLang = useCallback((lang: CopilotLang) => {
+    copilotLangRef.current = lang
+    setCopilotLangState(lang)
+  }, [])
+
   const clearAnswers = useCallback(() => setAnswers([]), [])
 
   const resetSession = useCallback(() => {
+    clearPreview()
     setStatus('idle'); setMeetingId(null); setTranscript([]); setAnswers([])
     setWordCount(0); setDuration(0); setError(null); setInterimText(''); setMeetingInterim('')
     setMeetingTentative(''); setSegmentTranslations({}); setLiveTranslation(null); setEngineKind(null); setMeetingContext(null)
@@ -496,7 +628,8 @@ export function useLiveSession() {
   return {
     status, meetingId, transcript, answers, wordCount, duration, nameHeard,
     error, isListening, interimText, meetingInterim, meetingTentative, audioTracksOk, debugLogs,
-    engineKind, engineStatus, segmentTranslations, liveTranslation, meetingContext,
+    engineKind, engineStatus, segmentTranslations, liveTranslation, meetingContext, copilotLang, contextBusy,
     startSession, endSession, askCopilot, researchCopilot, clearAnswers, resetSession,
+    investigateContext, setTranslationLang, setVoiceLang, setCopilotLang,
   }
 }

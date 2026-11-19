@@ -49,6 +49,12 @@ const refs: MediaRefs = {
   timerInterval: null, animationFrame: null, storedRecordingId: null,
 }
 
+/** Video grabado que falta por subir (para el diagnóstico de IA en Vivo, PRP-005). `null` = no se graba. */
+export function recordingBacklogBytes(): number | null {
+  const u = refs.uploader
+  return u ? Math.max(0, u.recordedBytes() - u.uploadedBytes()) : null
+}
+
 function stopAllStreams() {
   refs.displayStream?.getTracks().forEach(t => t.stop())
   refs.micStream?.getTracks().forEach(t => t.stop())

@@ -8,6 +8,7 @@
 import { startMeetingAudioTap } from '../audio/meetingAudio'
 import { NAME_PATTERN, SAP_TERMS } from '../copilot/profile'
 import type { EngineCallbacks, MeetingEngine } from './types'
+import { after, every } from '../utils/ticker'
 
 const WS_URL             = 'wss://stt-rt.soniox.com/transcribe-websocket'
 const MAX_SEGMENT_CHARS  = 600   // un turno larguísimo pasa al historial al cerrar una oración
@@ -25,6 +26,7 @@ const NO_AUDIO_MS         = 3000      // el worklet entrega 10 tramos por segund
 const WATCH_MS            = 1000
 const MAX_RECONNECTS      = 6         // por ventana de 10 min; después, al motor por tramos
 const RECONNECT_WINDOW_MS = 10 * 60_000
+const DRAIN_MS            = 2500      // cambio de idioma: lo que espera a la conexión vieja
 
 export type WatchVerdict = 'ok' | 'no-audio' | 'stalled' | 'backlog'
 
@@ -67,6 +69,9 @@ export class StreamTurns {
   private lang = ''                   // idioma de lo último que se dijo (identificación de Soniox)
   /** `target`: idioma de la traducción. Lo que ya se dice en ese idioma no trae traducción: se muestra tal cual. */
   constructor(private cb: EngineCallbacks, private target: string | null = null) {}
+
+  /** Nuevo idioma de la traducción (cambio a media reunión, PRP-005). */
+  setTarget(target: string | null) { this.target = target }
 
   private sameLanguage(): boolean {
     return !!this.target && !!this.lang && this.lang.toLowerCase().startsWith(this.target.toLowerCase())
@@ -168,7 +173,9 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
   let reconnectTimes: number[] = []
   let reconnecting = false
   let audioStalled = false
-  let watch: ReturnType<typeof setInterval> | null = null
+  let stopWatchTicker: (() => void) | null = null
+  let translateTo = opts.translateTo
+  let draining: WebSocket | null = null // conexión vieja que termina de entregar tras un cambio de idioma
   const watchdog = new StreamWatchdog(Date.now())
 
   // El audio empieza a guardarse ya; se manda en cuanto la conexión está lista.
@@ -198,13 +205,13 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
       enable_endpoint_detection: true,
       max_endpoint_delay_ms: 1500,
       context: sonioxContext(terms),
-      ...(opts.translateTo ? { translation: { type: 'one_way', target_language: opts.translateTo } } : {}),
+      ...(translateTo ? { translation: { type: 'one_way', target_language: translateTo } } : {}),
     }
   }
 
   function stopWatch() {
-    if (watch) clearInterval(watch)
-    watch = null
+    stopWatchTicker?.()
+    stopWatchTicker = null
   }
 
   function fail(reason: string) {
@@ -227,9 +234,9 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
       const socket = new WebSocket(WS_URL, ['soniox-api-key', token.apiKey])
       socket.binaryType = 'arraybuffer'
       ws = socket
-      const timer = setTimeout(() => { reject(new Error('la conexión no abrió a tiempo')); try { socket.close() } catch { /**/ } }, CONNECT_TIMEOUT_MS)
+      const cancelTimer = after(CONNECT_TIMEOUT_MS, () => { reject(new Error('la conexión no abrió a tiempo')); try { socket.close() } catch { /**/ } })
       socket.onopen = () => {
-        clearTimeout(timer)
+        cancelTimer()
         socket.send(JSON.stringify(config(token.model)))
         for (const buf of queue.splice(0)) socket.send(buf)
         ready = true
@@ -238,7 +245,13 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
         resolve()
       }
       socket.onmessage = (e: MessageEvent) => {
-        if (typeof e.data !== 'string' || ws !== socket) return
+        if (typeof e.data !== 'string') return
+        // La conexión vieja de un cambio de idioma aún entrega sus últimas palabras (ver drain()).
+        if (ws !== socket) {
+          if (draining !== socket) return
+          try { turns.handle(JSON.parse(e.data) as SonioxMessage) } catch { /**/ }
+          return
+        }
         watchdog.message(Date.now())
         let msg: SonioxMessage
         try { msg = JSON.parse(e.data) } catch { return }
@@ -252,9 +265,9 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
         turns.handle(msg)
         if (msg.finished) finished = true
       }
-      socket.onerror = () => { clearTimeout(timer); reject(new Error('error de conexión')) }
+      socket.onerror = () => { cancelTimer(); reject(new Error('error de conexión')) }
       socket.onclose = (e: CloseEvent) => {
-        clearTimeout(timer)
+        cancelTimer()
         if (ws !== socket) return
         ready = false
         // Sin una primera conexión, el arranque ya lanzó el error y el hook usa el motor por tramos.
@@ -264,25 +277,36 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
     })
   }
 
-  /** Abre una conexión nueva con llave nueva; tras varias seguidas, pasa al motor por tramos. */
-  function reconnect(reason: string) {
+  /**
+   * Abre una conexión nueva con llave nueva; tras varias seguidas, pasa al motor por tramos.
+   * `planned` = cambio de idioma pedido por el usuario: no cuenta como falla y no espera. El audio de
+   * mientras se guarda en `queue` y se manda al abrir, así no se pierden palabras.
+   */
+  function reconnect(reason: string, planned = false) {
     if (stopping || reconnecting) return
-    const times = nextReconnect(reconnectTimes, Date.now())
-    if (!times) { fail(`${reason}; demasiadas reconexiones seguidas`); return }
-    reconnectTimes = times
+    let delay = 0
+    if (!planned) {
+      const times = nextReconnect(reconnectTimes, Date.now())
+      if (!times) { fail(`${reason}; demasiadas reconexiones seguidas`); return }
+      reconnectTimes = times
+      delay = Math.min(4000, 500 * 2 ** (times.length - 1))
+    }
     reconnecting = true
-    cb.log(`Streaming: ${reason} → reconectando (${times.length} en 10 min)…`)
-    cb.diag?.('reconnect', { reason, n: times.length, audio: tap.state() })
-    cb.status?.('reconnecting')
+    cb.log(`Streaming: ${reason} → ${planned ? 'reabriendo la conexión' : `reconectando (${reconnectTimes.length} en 10 min)`}…`)
+    cb.diag?.(planned ? 'lang-switch' : 'reconnect', { reason, n: reconnectTimes.length, audio: tap.state() })
+    if (!planned) cb.status?.('reconnecting') // un cambio de idioma no es una falla: sin aviso ámbar
     const old = ws
     ws = null // las respuestas y el cierre de la conexión vieja ya no cuentan
     ready = false
-    try { old?.close() } catch { /**/ }
-    turns.commit() // lo ya reconocido pasa al historial; la conexión nueva empieza de cero
-    cb.preview({ text: '', tentative: '' })
-    cb.translationPreview?.({ text: '', tentative: '' })
-    const delay = Math.min(4000, 500 * 2 ** (times.length - 1))
-    setTimeout(() => {
+    if (planned && old?.readyState === WebSocket.OPEN) {
+      drain(old)
+    } else {
+      try { old?.close() } catch { /**/ }
+      turns.commit() // lo ya reconocido pasa al historial; la conexión nueva empieza de cero
+      cb.preview({ text: '', tentative: '' })
+      cb.translationPreview?.({ text: '', tentative: '' })
+    }
+    const reopen = () => {
       if (stopping) { reconnecting = false; return }
       fetchToken(opts.meetingId)
         .then(t => { token = t; return connect() })
@@ -296,11 +320,30 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
           reconnecting = false
           reconnect(`no se pudo reconectar (${err instanceof Error ? err.message : String(err)})`)
         })
-    }, delay)
+    }
+    // Con el reloj del Worker: con la pestaña tapada, setTimeout podía tardar hasta un minuto.
+    if (delay) after(delay, reopen)
+    else reopen()
+  }
+
+  /**
+   * Cambio de idioma: la conexión vieja ya no recibe audio (el nuevo va a la cola de la conexión nueva),
+   * pero se le pide terminar lo que ya oyó. Sin esto se perdían las palabras que Soniox aún no
+   * confirmaba al cortar (medido: 4 de 100 en scripts/test-lang-switch.ts).
+   */
+  function drain(old: WebSocket) {
+    draining = old
+    try { old.send(JSON.stringify({ type: 'finalize' })) } catch { /**/ }
+    after(DRAIN_MS, () => {
+      if (draining === old) draining = null
+      try { old.close() } catch { /**/ }
+      turns.commit()
+    })
   }
 
   function startWatch() {
-    watch = setInterval(() => {
+    // En el Worker: con la pestaña tapada el vigilante sigue revisando cada segundo (ver utils/ticker).
+    stopWatchTicker = every(WATCH_MS, () => {
       if (stopping) return
       const now = Date.now()
       const open = !!ws && ready && ws.readyState === WebSocket.OPEN
@@ -318,7 +361,7 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
       } else if (verdict === 'stalled') {
         reconnect(`${Math.round(watchdog.silentFor(now) / 1000)} s sin respuesta de Soniox`)
       }
-    }, WATCH_MS)
+    })
   }
 
   terms = await Promise.race([opts.terms().catch(() => []), new Promise<string[]>(r => setTimeout(() => r([]), TERMS_WAIT_MS))])
@@ -334,6 +377,13 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
 
   return {
     kind: 'stream',
+    setTranslateTo(lang) {
+      if (stopping || lang === translateTo) return
+      translateTo = lang
+      turns.setTarget(lang)
+      reconnect(`cambio de idioma de la traducción a ${lang ?? 'ninguno'}`, true)
+    },
+    stats: () => ({ buffered: ws?.bufferedAmount ?? 0, queued: queue.length, reconnects: reconnectTimes.length }),
     async stop() {
       if (stopping) return
       stopping = true
