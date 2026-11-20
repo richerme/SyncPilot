@@ -6,7 +6,7 @@ import { GEMINI_MODELS, NO_THINKING } from '@/lib/geminiModels'
 import { relevantDocContext } from '@/lib/docContext'
 import { getMeetingContext, type MeetingContext } from '@/lib/meetingContext'
 import { fullTranscript } from '@/lib/meetingTranscript'
-import { copilotConversation } from '@/lib/meetingIdentity'
+import { copilotConversation, BUTTON_ASK, type EarlierAnswer } from '@/lib/meetingIdentity'
 import { COPILOT_NAME } from '@/features/live/copilot/profile'
 import { COPILOT_SYSTEM } from '@/features/live/copilot/knowhow'
 import { openWithFallback, chatCompletionStream, CopilotUnavailableError, type CopilotProvider } from '@/lib/copilotAnswer'
@@ -20,9 +20,27 @@ const Schema = z.object({
   // Lo que todavía no está guardado en la base de datos: últimos fragmentos y el turno en curso.
   live:     z.string().max(20000).default(''),
   trigger:  z.enum(['button', 'name', 'typed']).default('button'),
+  // Idioma de la respuesta, elegido en IA en Vivo para esa reunión (PRP-005). Inglés por defecto.
+  answerLang: z.enum(['en', 'es']).default('en'),
 })
 
+// Las instrucciones (en el caché) piden inglés; esta línea al final de la conversación lo cambia.
+const SPANISH_ANSWER = `ANSWER LANGUAGE: write this answer in clear, natural, professional Spanish (Latin American), in first person as ${COPILOT_NAME}, with the same length and style rules. Keep standard SAP terms as they are (BAdI, IDoc, BAPI, CDS view, transport).`
+
 const RELEVANT_DOCS_CHARS  = 400_000
+const EARLIER_ANSWERS      = 3     // las últimas respuestas que ya viste, para no repetirlas
+const EARLIER_ANSWER_CHARS = 700
+
+/** Las últimas respuestas del Copiloto en esta reunión (las guarda esta misma ruta al terminar). */
+async function earlierAnswers(meetingId: string): Promise<EarlierAnswer[]> {
+  const rows = await prisma.meetingSuggestion.findMany({
+    where: { meetingId, type: 'reply' },
+    orderBy: { createdAt: 'desc' },
+    take: EARLIER_ANSWERS,
+    select: { timestampMs: true, text: true },
+  }).catch(() => [])
+  return rows.reverse().map(r => ({ atMs: r.timestampMs, text: r.text.slice(0, EARLIER_ANSWER_CHARS) }))
+}
 
 /** Documentos para el prompt cuando no hay caché (o el caché falló). */
 async function docsForPrompt(ctx: MeetingContext, userId: string, query: string): Promise<string> {
@@ -47,19 +65,22 @@ export async function POST(request: Request, { params }: RouteParams) {
 
   const parsed = Schema.safeParse(await request.json().catch(() => ({})))
   if (!parsed.success) return NextResponse.json({ error: 'Datos inválidos' }, { status: 400 })
-  const { question, live, trigger } = parsed.data
+  const { question, live, trigger, answerLang } = parsed.data
 
   const ai = getGenAI()
   const openRouterKey = process.env.OPENROUTER_API_KEY
   if (!ai && !openRouterKey) return NextResponse.json({ error: 'Falta GEMINI_API_KEY (y OPENROUTER_API_KEY de respaldo) en el servidor' }, { status: 500 })
 
-  // Documentos completos (caché de la reunión) + resumen + TODA la reunión + la pregunta.
-  const [ctx, transcript] = await Promise.all([getMeetingContext(userId, meetingId), fullTranscript(meetingId, live)])
+  // Documentos completos (caché de la reunión) + resumen + TODA la reunión + lo que ya contestó + la pregunta.
+  const [ctx, transcript, earlier] = await Promise.all([
+    getMeetingContext(userId, meetingId),
+    fullTranscript(meetingId, live),
+    earlierAnswers(meetingId),
+  ])
   if (!question?.trim() && !transcript) return NextResponse.json({ error: 'Todavía no hay conversación' }, { status: 400 })
-  const ask = question?.trim()
-    ? question.trim()
-    : `The most recent question or request addressed to ${COPILOT_NAME} (or still waiting for his answer) in the transcript.`
-  const conversation = copilotConversation({ meeting, brief: ctx.brief, transcript, trigger, ask })
+  const ask = question?.trim() ? question.trim() : BUTTON_ASK
+  const baseConversation = copilotConversation({ meeting, brief: ctx.brief, transcript, trigger, ask, earlier })
+  const conversation = answerLang === 'es' ? `${baseConversation}\n\n${SPANISH_ANSWER}` : baseConversation
   const base = { temperature: 0.3, maxOutputTokens: 500, thinkingConfig: NO_THINKING } // primera palabra en ~1 s
 
   // Proveedores en orden (10 nov 2026): Gemini (con caché si hay) y, si falla al abrir o en el primer

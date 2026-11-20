@@ -37,13 +37,28 @@ export function describeMeeting(m: MeetingIdentity, timeZone = MEETING_TIME_ZONE
 }
 
 /** La parte del prompt del Copiloto que cambia en cada pregunta (lo fijo va en el caché). */
+/** Respuesta que el Copiloto ya le mostró al usuario en esta reunión (minuto desde el inicio). */
+export interface EarlierAnswer { atMs: number; text: string }
+
+const mmss = (ms: number) => `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
+
+// Botón «Responder» sin pregunta (pedido del usuario, 19 nov 2026): tras contestar cuando lo nombran, la
+// plática sigue (otro tema, una interrupción o el mismo tema alargado). El botón contesta lo de AHORA y no
+// repite la respuesta anterior si ya no aplica.
+export const BUTTON_ASK = `What ${COPILOT_NAME} should say NOW about the latest part of the transcript: the most recent question, request or open point directed at him or waiting for his input. Compare it with YOUR EARLIER ANSWERS: if the conversation moved to another topic after the last one, answer the newest point; if they extended or changed the same topic, give an updated answer that covers what was added; never repeat an earlier answer as it was. If nobody is waiting for him, give the most useful thing he could add to what is being discussed right now.`
+
 export function copilotConversation(o: {
   meeting: MeetingIdentity; brief: string; transcript: string; trigger: 'button' | 'name' | 'typed'; ask: string
+  earlier?: EarlierAnswer[]
 }): string {
+  const earlier = (o.earlier ?? []).filter(a => a.text.trim())
   return [
     describeMeeting(o.meeting),
     o.brief ? `MEETING CONTEXT (prepared at the start from the documents, in Spanish; if it points to another client or meeting than THIS MEETING, follow THIS MEETING):\n${o.brief}` : '',
     `MEETING TRANSCRIPT (whole meeting so far, oldest first, [mm:ss] from the start; "${COPILOT_NAME}:" is ${COPILOT_NAME}, "Meeting:" are the other participants):\n${o.transcript || '(empty)'}`,
+    earlier.length
+      ? `YOUR EARLIER ANSWERS IN THIS MEETING (already shown to ${COPILOT_NAME}, oldest first, [mm:ss] when shown):\n${earlier.map(a => `[${mmss(a.atMs)}] ${a.text.trim()}`).join('\n\n')}`
+      : '',
     `${o.trigger === 'typed' ? `${COPILOT_NAME} wants help with` : 'QUESTION TO ANSWER'}: ${o.ask}`,
   ].filter(Boolean).join('\n\n')
 }

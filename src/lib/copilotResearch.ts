@@ -39,6 +39,73 @@ Return JSON {"query": string}.
 
 export const SEARCH_SYSTEM = `You are a senior SAP ABAP consultant. Answer the question in English in 2 to 4 short sentences using current web results. Mention the SAP release or edition when it matters. If sources disagree or it depends on the release, say so.`
 
+/** Lo mismo, pero contestando en el idioma que se habla en la reunión (Investigar libre, PRP-005). */
+export function searchSystem(language: string): string {
+  return SEARCH_SYSTEM.replace('in English', `in ${languageName(language)}`)
+}
+
+// ── «Investigar» libre (PRP-005, fase 1): de qué se está hablando ahora ──────────────────────────
+// Sin pregunta ni respuesta: el modelo lee lo último de la reunión y devuelve, en el idioma en que se
+// está hablando, los últimos puntos (solo para el usuario) y UNA pregunta técnica genérica que es lo
+// único que sale a internet, con las mismas reglas de REWRITE_SYSTEM y después scrubQuery.
+export const CONTEXT_SYSTEM = `You help an SAP ABAP consultant who is in a live meeting and wants to understand what is being discussed right now.
+You get the latest part of the meeting transcript (oldest first; the END is what is being discussed now). Lines marked "Rick:" are the consultant who uses this tool; lines marked "Meeting:" are the other participants (so a question in a "Meeting:" line is asked TO Rick).
+Return JSON {"language": string, "points": string[], "query": string}.
+- "language": ISO 639-1 code of the language spoken in the LAST lines of the transcript (for example "es" or "en").
+- "points": 2 to 4 short bullet points, written in that language, about the LATEST points of the conversation (give the most weight to the last lines). Explain any technical term in a few words inside the point. No greetings, no advice, no invented facts.
+- "query": ONE generic technical question about STANDARD SAP, in English, at most 25 words, that would help understand the main technical topic of those latest points. Keep standard SAP terms (products and releases, standard transactions, tables, CDS views, BAdIs, classes, function modules, BAPIs, IDoc types). REMOVE everything that identifies the project or the client: company and client names, people, cities, system IDs and client numbers, hostnames, project or team names, custom objects (names starting with Z or Y, or in a customer namespace), ticket, order or document numbers, amounts and dates. If the latest points are only about project facts (status, dates, estimates, who does what), use "".`
+
+const LANGUAGE_NAMES: Record<string, string> = {
+  es: 'Spanish', en: 'English', pt: 'Portuguese', fr: 'French', de: 'German', it: 'Italian', ja: 'Japanese', zh: 'Chinese', ko: 'Korean',
+}
+
+/** Nombre del idioma para las instrucciones del modelo (código ISO 639-1; si no se conoce, inglés). */
+export function languageName(code: string): string {
+  return LANGUAGE_NAMES[code.trim().toLowerCase().slice(0, 2)] ?? 'English'
+}
+
+export interface ContextSummary { language: string; points: string[]; query: string }
+
+export function contextUserPrompt(transcriptTail: string): string {
+  return `LATEST MEETING TRANSCRIPT (the end is what is being discussed now):\n${transcriptTail.slice(-6000) || '(empty)'}`
+}
+
+export function parseContext(text: string): ContextSummary {
+  const m = text.match(/\{[\s\S]*\}/)
+  try {
+    const j = JSON.parse(m ? m[0] : text) as { language?: unknown; points?: unknown; query?: unknown }
+    const lang = typeof j.language === 'string' && /^[a-z]{2}/i.test(j.language.trim()) ? j.language.trim().slice(0, 2).toLowerCase() : 'en'
+    const points = Array.isArray(j.points) ? j.points.filter((p): p is string => typeof p === 'string' && !!p.trim()).map(p => p.trim().slice(0, 400)).slice(0, 4) : []
+    return { language: lang, points, query: typeof j.query === 'string' ? j.query.trim() : '' }
+  } catch { return { language: 'en', points: [], query: '' } }
+}
+
+export interface ContextOutcome { language: string; points: string[]; query: string; removed: string[]; provider: string; failures: ProviderFailure[]; ms: number }
+
+/** Paso único (sin internet): últimos puntos + pregunta técnica ya filtrada. La búsqueda va aparte. */
+export async function runContextSummary(transcriptTail: string, blockedTerms: string[], steps: Step<string, string>[]): Promise<ContextOutcome> {
+  const failures: ProviderFailure[] = []
+  const t0 = Date.now()
+  const done = await firstThatWorks(steps, contextUserPrompt(transcriptTail), failures)
+  const parsed = parseContext(done.out)
+  const { query, removed } = scrubQuery(parsed.query, blockedTerms)
+  return {
+    language: parsed.language, points: parsed.points,
+    query: query.split(/\s+/).filter(Boolean).length < 3 ? '' : query,
+    removed, provider: done.name, failures, ms: Date.now() - t0,
+  }
+}
+
+/** Búsqueda de una pregunta ya filtrada (segunda parte de Investigar libre). Se vuelve a filtrar aquí. */
+export async function runQuerySearch(query: string, blockedTerms: string[], steps: Step<string, SearchOutcome>[]): Promise<ResearchOutcome> {
+  const failures: ProviderFailure[] = []
+  const clean = scrubQuery(query, blockedTerms)
+  if (clean.query.split(/\s+/).filter(Boolean).length < 3) throw new NothingToSearchError()
+  const t0 = Date.now()
+  const found = await firstThatWorks(steps, clean.query, failures)
+  return { ...found.out, provider: found.name, query: clean.query, removed: clean.removed, failures, ms: { rewrite: 0, search: Date.now() - t0 } }
+}
+
 export function rewriteUserPrompt(input: Omit<ResearchInput, 'blockedTerms'>): string {
   return [
     `QUESTION: ${input.question?.trim() || '(not typed: use the latest question addressed to the consultant in the transcript)'}`,
@@ -180,11 +247,22 @@ export function geminiRewriteStep(ai: GoogleGenAI): Step<string, string> {
   } }
 }
 
-export function geminiSearchStep(ai: GoogleGenAI): Step<string, SearchOutcome> {
+export function geminiContextStep(ai: GoogleGenAI): Step<string, string> {
+  return { name: 'Gemini', run: async (prompt) => {
+    const r = await ai.models.generateContent({
+      model: GEMINI_MODELS.copilot, contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: { systemInstruction: CONTEXT_SYSTEM, temperature: 0.2, maxOutputTokens: 700, responseMimeType: 'application/json', thinkingConfig: NO_THINKING },
+    })
+    if (!r.text?.trim()) throw new Error('Gemini no devolvió el resumen')
+    return r.text
+  } }
+}
+
+export function geminiSearchStep(ai: GoogleGenAI, language = 'en'): Step<string, SearchOutcome> {
   return { name: 'Gemini + Google Search', run: async (query) => {
     const r = await ai.models.generateContent({
       model: GEMINI_MODELS.copilot, contents: [{ role: 'user', parts: [{ text: query }] }],
-      config: { systemInstruction: SEARCH_SYSTEM, tools: [{ googleSearch: {} }], temperature: 0.2, maxOutputTokens: 400, thinkingConfig: NO_THINKING },
+      config: { systemInstruction: searchSystem(language), tools: [{ googleSearch: {} }], temperature: 0.2, maxOutputTokens: 400, thinkingConfig: NO_THINKING },
     })
     const out = parseGeminiGrounding(r)
     if (!out.text) throw new Error('Gemini no devolvió texto con la búsqueda')
@@ -216,10 +294,20 @@ export function openRouterRewriteStep(o: OpenRouterOpts): Step<string, string> {
   } }
 }
 
-export function openRouterSearchStep(o: OpenRouterOpts): Step<string, SearchOutcome> {
+export function openRouterContextStep(o: OpenRouterOpts): Step<string, string> {
+  return { name: 'OpenRouter', run: async (prompt) => {
+    const j = await openRouterChat(o, { temperature: 0.2, max_tokens: 700, response_format: { type: 'json_object' },
+      messages: [{ role: 'system', content: CONTEXT_SYSTEM }, { role: 'user', content: prompt }] })
+    const text = j.choices?.[0]?.message?.content ?? ''
+    if (!text.trim()) throw new Error('OpenRouter no devolvió el resumen')
+    return text
+  } }
+}
+
+export function openRouterSearchStep(o: OpenRouterOpts, language = 'en'): Step<string, SearchOutcome> {
   return { name: 'OpenRouter + web', run: async (query) => {
     const j = await openRouterChat(o, { temperature: 0.2, max_tokens: 400, plugins: [{ id: 'web', max_results: 3 }],
-      messages: [{ role: 'system', content: SEARCH_SYSTEM }, { role: 'user', content: query }] })
+      messages: [{ role: 'system', content: searchSystem(language) }, { role: 'user', content: query }] })
     const out = parseOpenRouterSearch(j)
     if (!out.text) throw new Error('OpenRouter no devolvió texto con la búsqueda')
     return out
