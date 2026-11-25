@@ -49,6 +49,17 @@ const refs: MediaRefs = {
   timerInterval: null, animationFrame: null, storedRecordingId: null,
 }
 
+/**
+ * IA en Vivo avisa cuando empieza y cuando termina. Si ya se está grabando, cambia los cuadros por segundo al
+ * momento (el bitrate de un MediaRecorder no se cambia a medio camino; con menos cuadros igual baja el trabajo
+ * de codificar). Las grabaciones que empiezan con IA en Vivo activa nacen ligeras.
+ */
+export function setLiveActive(active: boolean) {
+  liveActive = active
+  const fps = active ? LIGHT_FRAME_RATE : FRAME_RATE
+  refs.displayStream?.getVideoTracks()[0]?.applyConstraints({ frameRate: { ideal: fps, max: fps } }).catch(() => { /* la grabación sigue igual */ })
+}
+
 /** Video grabado que falta por subir (para el diagnóstico de IA en Vivo, PRP-005). `null` = no se graba. */
 export function recordingBacklogBytes(): number | null {
   const u = refs.uploader
@@ -82,6 +93,11 @@ const VIDEO_TYPES = [
 const FRAME_RATE = 15
 const VIDEO_BITRATE = 2_500_000
 const TIMESLICE_MS = 5000
+// Grabación ligera mientras corre IA en Vivo (decisión del usuario del 19 nov, opción a): las pantallas de SAP
+// casi no se mueven, y 8 fps a ~1.2 Mbps es la mitad de trabajo y de subida durante la reunión.
+const LIGHT_FRAME_RATE = 8
+const LIGHT_VIDEO_BITRATE = 1_200_000
+let liveActive = false
 
 async function completeRecording(recordingId: string, durationSecs: number) {
   const res = await fetch(`/api/recordings/${recordingId}/complete`, {
@@ -122,7 +138,7 @@ export const useRecordingStore = create<RecordingState & RecordingActions>((set,
 
       // 2. Captura de pantalla
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: FRAME_RATE, max: FRAME_RATE } } as MediaTrackConstraints,
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: liveActive ? LIGHT_FRAME_RATE : FRAME_RATE, max: liveActive ? LIGHT_FRAME_RATE : FRAME_RATE } } as MediaTrackConstraints,
         audio: includeSystemAudio,
       })
       refs.displayStream = displayStream
@@ -190,7 +206,7 @@ export const useRecordingStore = create<RecordingState & RecordingActions>((set,
       refs.mimeType = mimeType || 'video/webm'
 
       const mediaRecorder = new MediaRecorder(combinedStream, {
-        ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: VIDEO_BITRATE, audioBitsPerSecond: 128_000,
+        ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: liveActive ? LIGHT_VIDEO_BITRATE : VIDEO_BITRATE, audioBitsPerSecond: 128_000,
       })
       refs.mediaRecorder = mediaRecorder
       const uploader = createChunkUploader(recordingId, (uploaded, recorded) => {

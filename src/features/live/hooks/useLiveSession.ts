@@ -11,7 +11,7 @@ import {
 } from '../copilot/streamAnswer'
 import { after } from '../utils/ticker'
 import { startPerfMonitor } from '../diag/perfMonitor'
-import { recordingBacklogBytes } from '@/features/recording/store/recordingStore'
+import { recordingBacklogBytes, setLiveActive } from '@/features/recording/store/recordingStore'
 
 export type { CopilotAnswer, CopilotLang }
 
@@ -444,6 +444,7 @@ export function useLiveSession() {
       // Voz del usuario (instantánea) + audio de la reunión (pestaña/pantalla)
       launchSpeechRecognition(voiceLang)
       await launchMeetingCapture()
+      setLiveActive(true) // la Grabación baja a 8 fps mientras corre IA en Vivo
 
       // Desde la hora de inicio: con la pestaña tapada el reloj se frena y sumar 1 por tic se atrasaba.
       timerRef.current = setInterval(() => setDuration(Math.floor((Date.now() - sessionStartRef.current) / 1000)), DURATION_TICK_MS)
@@ -465,6 +466,7 @@ export function useLiveSession() {
       shouldRestartRef.current = false
       try { recognitionRef.current?.abort() } catch { /**/ }
       stopAllStreams()
+      setLiveActive(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -484,6 +486,7 @@ export function useLiveSession() {
     nameTimerRef.current = null
     nameArmedRef.current = null
     setNameHeard(false)
+    setLiveActive(false)
     setIsListening(false)
     setInterimText('')
     engineCallbacks.preview(EMPTY_PREVIEW)
