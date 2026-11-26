@@ -82,6 +82,7 @@ export function startPerfMonitor(deps: PerfMonitorDeps): () => void {
       domNodes: document.getElementsByTagName('*').length,
       buffered: stats?.buffered ?? null,
       queued: stats?.queued ?? null,
+      fallbacks: stats?.translateFallbacks ?? null, // frases traducidas por el respaldo (Gemini) en la reunión
       recBacklogMb: backlog === null ? null : Math.round(backlog / 104857.6) / 10,
     })
     longTasks = 0; longMs = 0; maxLag = 0; hiddenMs = 0

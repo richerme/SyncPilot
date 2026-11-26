@@ -22,6 +22,8 @@ export interface EngineCallbacks {
   commit(text: string, translation?: string): void
   /** Traducción que llegó después de cerrar el pedazo: se agrega al último (solo stream). */
   amendTranslation?(text: string): void
+  /** Pedazo cerrado en otro idioma que Soniox no tradujo: pedir la traducción de respaldo (Gemini) para el último (solo stream). */
+  translateFallback?(text: string): void
   /** Terminó de hablar quien tenía la palabra. */
   turnEnd(): void
   /** Texto recién reconocido, para detectar el nombre lo antes posible. */
@@ -40,6 +42,8 @@ export interface EngineStats {
   /** Tramos guardados mientras se abre la conexión. */
   queued: number
   reconnects: number
+  /** Frases que se mandaron a la traducción de respaldo en lo que va de la reunión. */
+  translateFallbacks?: number
 }
 
 export interface MeetingEngine {

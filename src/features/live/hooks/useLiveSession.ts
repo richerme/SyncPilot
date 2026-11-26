@@ -11,6 +11,10 @@ import {
 } from '../copilot/streamAnswer'
 import { after } from '../utils/ticker'
 import { startPerfMonitor } from '../diag/perfMonitor'
+import { translate } from './useLiveTranslation'
+
+/** Texto de la fila mientras llega la traducción de respaldo (no se repite el original en la columna de traducción). */
+export const TRANSLATING_PLACEHOLDER = 'Traduciendo…'
 import { recordingBacklogBytes, setLiveActive } from '@/features/recording/store/recordingStore'
 
 export type { CopilotAnswer, CopilotLang }
@@ -70,6 +74,10 @@ export function useLiveSession() {
   const [engineStatus,   setEngineStatus]   = useState<EngineStatus>('ok') // reconectando / sin audio: aviso en pantalla
   // Traducción que llega junto con la transcripción (motor stream); en chunked la hace useLiveTranslation.
   const [segmentTranslations, setSegmentTranslations] = useState<Record<string, string>>({})
+  // Traducción de respaldo (decisión 1a, 25 nov): filas esperando a Gemini y filas que ya tradujo Gemini
+  // (si después llega la de Soniox, no se suma encima).
+  const fallbackPendingRef = useRef(new Set<string>())
+  const fallbackDoneRef    = useRef(new Set<string>())
   const [liveTranslation, setLiveTranslation] = useState<LivePreview | null>(null)
   const [meetingContext, setMeetingContext] = useState<MeetingContextInfo | null>(null)
   const [nameHeard,      setNameHeard]      = useState(false)   // te nombraron; esperando la pregunta
@@ -282,7 +290,28 @@ export function useLiveSession() {
     },
     amendTranslation(text) {
       const last = [...transcriptRef.current].reverse().find(seg => seg.speaker === 'meeting')
-      if (last) setSegmentTranslations(prev => ({ ...prev, [last.id]: `${prev[last.id] ?? ''}${text}`.trim() }))
+      if (!last || fallbackDoneRef.current.has(last.id)) return // ya la tradujo el respaldo
+      // Soniox llegó antes que Gemini: su traducción reemplaza el «Traduciendo…».
+      const replace = fallbackPendingRef.current.delete(last.id)
+      setSegmentTranslations(prev => ({ ...prev, [last.id]: `${replace ? '' : prev[last.id] ?? ''}${text}`.trim() }))
+    },
+    translateFallback(text) {
+      const lang = translateToRef.current
+      const last = [...transcriptRef.current].reverse().find(seg => seg.speaker === 'meeting')
+      if (!lang || !last) return
+      const id = last.id
+      fallbackPendingRef.current.add(id)
+      setSegmentTranslations(prev => ({ ...prev, [id]: TRANSLATING_PLACEHOLDER }))
+      void translate(text, lang).then(tr => {
+        if (!fallbackPendingRef.current.delete(id)) return // Soniox tradujo primero
+        if (tr) fallbackDoneRef.current.add(id)
+        setSegmentTranslations(prev => {
+          const next = { ...prev }
+          if (tr) next[id] = tr
+          else delete next[id] // sin respaldo: la fila queda sin traducción, no con el original
+          return next
+        })
+      })
     },
     turnEnd() {
       if (nameArmedRef.current !== null) fireName()
@@ -415,6 +444,8 @@ export function useLiveSession() {
     setMeetingInterim('')
     setMeetingTentative('')
     setSegmentTranslations({})
+    fallbackPendingRef.current.clear()
+    fallbackDoneRef.current.clear()
     setLiveTranslation(null)
     setMeetingContext(null)
     setNameHeard(false)
@@ -444,7 +475,7 @@ export function useLiveSession() {
       // Voz del usuario (instantánea) + audio de la reunión (pestaña/pantalla)
       launchSpeechRecognition(voiceLang)
       await launchMeetingCapture()
-      setLiveActive(true) // la Grabación baja a 8 fps mientras corre IA en Vivo
+      setLiveActive(true) // la Grabación baja a 1 fps y 720p mientras corre IA en Vivo
 
       // Desde la hora de inicio: con la pestaña tapada el reloj se frena y sumar 1 por tic se atrasaba.
       timerRef.current = setInterval(() => setDuration(Math.floor((Date.now() - sessionStartRef.current) / 1000)), DURATION_TICK_MS)

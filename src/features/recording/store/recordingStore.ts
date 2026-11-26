@@ -17,6 +17,8 @@ interface RecordingState {
   slug: string | null
   error: string | null
   webcamEnabled: boolean
+  /** IA en Vivo está activa: la grabación va ligera (1 fps, 720p). Se muestra como insignia en la barra. */
+  lightMode: boolean
 }
 
 interface RecordingActions {
@@ -57,7 +59,9 @@ const refs: MediaRefs = {
 export function setLiveActive(active: boolean) {
   liveActive = active
   const fps = active ? LIGHT_FRAME_RATE : FRAME_RATE
-  refs.displayStream?.getVideoTracks()[0]?.applyConstraints({ frameRate: { ideal: fps, max: fps } }).catch(() => { /* la grabación sigue igual */ })
+  // Cuadros y resolución se cambian en caliente; el bitrate del MediaRecorder solo al empezar una grabación.
+  refs.displayStream?.getVideoTracks()[0]?.applyConstraints({ ...(active ? LIGHT_SIZE : NORMAL_SIZE), frameRate: { ideal: fps, max: fps } }).catch(() => { /* la grabación sigue igual */ })
+  useRecordingStore.setState({ lightMode: active })
 }
 
 /** Video grabado que falta por subir (para el diagnóstico de IA en Vivo, PRP-005). `null` = no se graba. */
@@ -93,10 +97,13 @@ const VIDEO_TYPES = [
 const FRAME_RATE = 15
 const VIDEO_BITRATE = 2_500_000
 const TIMESLICE_MS = 5000
-// Grabación ligera mientras corre IA en Vivo (decisión del usuario del 19 nov, opción a): las pantallas de SAP
-// casi no se mueven, y 8 fps a ~1.2 Mbps es la mitad de trabajo y de subida durante la reunión.
-const LIGHT_FRAME_RATE = 8
-const LIGHT_VIDEO_BITRATE = 1_200_000
+// Grabación ligera mientras corre IA en Vivo. 19 nov (opción a): 8 fps a ~1.2 Mbps. 25 nov (decisión 2a, tras la
+// reunión en que la laptop se quedó sin memoria): 1 cuadro por segundo y 720p; las pantallas de SAP casi no se mueven.
+// El audio queda igual. La pista de video no se quita: getDisplayMedia con audio del sistema la necesita.
+const LIGHT_FRAME_RATE = 1
+const LIGHT_VIDEO_BITRATE = 300_000
+const LIGHT_SIZE = { width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 } }
+const NORMAL_SIZE = { width: { ideal: 1920 }, height: { ideal: 1080 } }
 let liveActive = false
 
 async function completeRecording(recordingId: string, durationSecs: number) {
@@ -114,7 +121,7 @@ async function completeRecording(recordingId: string, durationSecs: number) {
 const INITIAL: RecordingState = {
   status: 'idle', duration: 0, audioLevel: 0,
   progress: 0, uploadedBytes: 0, totalBytes: 0,
-  recordingId: null, slug: null, error: null, webcamEnabled: false,
+  recordingId: null, slug: null, error: null, webcamEnabled: false, lightMode: false,
 }
 
 export const useRecordingStore = create<RecordingState & RecordingActions>((set, get) => ({
@@ -138,7 +145,7 @@ export const useRecordingStore = create<RecordingState & RecordingActions>((set,
 
       // 2. Captura de pantalla
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: liveActive ? LIGHT_FRAME_RATE : FRAME_RATE, max: liveActive ? LIGHT_FRAME_RATE : FRAME_RATE } } as MediaTrackConstraints,
+        video: { ...(liveActive ? LIGHT_SIZE : NORMAL_SIZE), frameRate: { ideal: liveActive ? LIGHT_FRAME_RATE : FRAME_RATE, max: liveActive ? LIGHT_FRAME_RATE : FRAME_RATE } } as MediaTrackConstraints,
         audio: includeSystemAudio,
       })
       refs.displayStream = displayStream
@@ -281,6 +288,6 @@ export const useRecordingStore = create<RecordingState & RecordingActions>((set,
     refs.mediaRecorder = null
     refs.uploader = null
     refs.storedRecordingId = null
-    set(INITIAL)
+    set({ ...INITIAL, lightMode: liveActive })
   },
 }))
