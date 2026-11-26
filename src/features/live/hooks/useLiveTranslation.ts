@@ -10,7 +10,8 @@ export const TRANSLATOR_LANG_KEY    = 'syncpilot_live_translator_lang'
 const INTERIM_DEBOUNCE_MS = 120
 const CATCH_UP_SEGMENTS   = 8 // al activar o cambiar de idioma a media sesión, solo se traducen los últimos
 
-async function translate(text: string, lang: string): Promise<string | null> {
+/** Traducción de un fragmento con Gemini Flash-Lite (~0.6 s). También es el respaldo de Soniox en IA en Vivo. */
+export async function translate(text: string, lang: string): Promise<string | null> {
   try {
     const res = await fetch('/api/audio-tools/translate-segment', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

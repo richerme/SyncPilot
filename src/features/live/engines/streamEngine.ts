@@ -55,6 +55,25 @@ export function nextReconnect(times: number[], now: number): number[] | null {
   return recent.length >= MAX_RECONNECTS ? null : [...recent, now]
 }
 
+// Palabras muy comunes para desempatar el idioma de una frase (sin las que se escriben igual en los dos, como «no» o «a»).
+const EN_WORDS = new Set(['the', 'and', 'is', 'are', 'we', 'you', 'that', 'this', 'it', 'to', 'of', 'for', 'with', 'have', 'has', 'will', 'can', 'what', 'how', 'do', 'does', 'be', 'on', 'in', 'so', 'just', 'okay', 'right', 'yeah', 'they', 'our', 'your', 'there', 'need', 'should', 'would', 'could', "it's", "don't", 'about', 'then', 'also', 'if', 'when'])
+const ES_WORDS = new Set(['el', 'la', 'los', 'las', 'que', 'de', 'y', 'es', 'en', 'un', 'una', 'por', 'para', 'con', 'se', 'lo', 'como', 'pero', 'más', 'muy', 'ya', 'también', 'está', 'son', 'del', 'al', 'su', 'sus', 'este', 'esta', 'eso', 'esto', 'hay', 'tiene', 'vamos', 'entonces', 'bueno', 'sí', 'cuando', 'porque', 'pues', 'nos'])
+
+/**
+ * Idioma de una frase cerrada (decisión 1a del 25 nov): la mayoría de los tokens de Soniox, no el último, y un
+ * desempate barato por palabras comunes cuando el texto dice claramente otra cosa (lógica pura, se prueba sin red).
+ */
+export function phraseLanguage(counts: Record<string, number>, text: string): string {
+  const words = text.toLowerCase().match(/[a-záéíóúñü']+/g) ?? []
+  let en = 0, es = 0
+  for (const w of words) { if (EN_WORDS.has(w)) en++; else if (ES_WORDS.has(w)) es++ }
+  if (en >= 2 && en > es * 2) return 'en'
+  if (es >= 2 && es > en * 2) return 'es'
+  let best = '', most = 0
+  for (const [lang, n] of Object.entries(counts)) if (n > most) { best = lang; most = n }
+  return best
+}
+
 export interface SonioxToken { text: string; is_final?: boolean; translation_status?: string; language?: string }
 export interface SonioxMessage { tokens?: SonioxToken[]; finished?: boolean; error_code?: number; error_type?: string; error_message?: string }
 
@@ -66,15 +85,20 @@ export class StreamTurns {
   private orig = ''
   private trans = ''
   private committedSinceTrans = false // ya se cerró el pedazo y aún puede llegar su traducción
-  private lang = ''                   // idioma de lo último que se dijo (identificación de Soniox)
+  private langCounts: Record<string, number> = {} // idioma de cada token final del pedazo en curso
+  /** Frases que Soniox no tradujo y se mandaron a la traducción de respaldo (Gemini). */
+  fallbacks = 0
   /** `target`: idioma de la traducción. Lo que ya se dice en ese idioma no trae traducción: se muestra tal cual. */
   constructor(private cb: EngineCallbacks, private target: string | null = null) {}
 
   /** Nuevo idioma de la traducción (cambio a media reunión, PRP-005). */
   setTarget(target: string | null) { this.target = target }
 
+  /** ¿El pedazo en curso ya está en el idioma de la traducción? Por mayoría de tokens, no por el último (25 nov). */
   private sameLanguage(): boolean {
-    return !!this.target && !!this.lang && this.lang.toLowerCase().startsWith(this.target.toLowerCase())
+    if (!this.target) return false
+    const lang = phraseLanguage(this.langCounts, this.orig)
+    return !!lang && lang.toLowerCase().startsWith(this.target.toLowerCase())
   }
 
   handle(msg: SonioxMessage) {
@@ -83,9 +107,11 @@ export class StreamTurns {
       if (t.text === '<end>') { this.commit(); ends++; continue }
       if (t.text === '<fin>') continue
       const isTrans = t.translation_status === 'translation'
-      if (!isTrans && t.language) this.lang = t.language
       if (!t.is_final) { if (isTrans) liveTrans += t.text; else liveOrig += t.text; continue }
-      if (!isTrans) { this.orig += t.text; heard += t.text; this.committedSinceTrans = false; continue }
+      if (!isTrans) {
+        if (t.language && t.text.trim()) this.langCounts[t.language] = (this.langCounts[t.language] ?? 0) + 1
+        this.orig += t.text; heard += t.text; this.committedSinceTrans = false; continue
+      }
       // Traducción final que llega cuando el original ya pasó al historial: es de ese pedazo.
       if (!this.orig.trim() && this.committedSinceTrans && this.cb.amendTranslation) this.cb.amendTranslation(t.text)
       else this.trans += t.text
@@ -105,11 +131,21 @@ export class StreamTurns {
 
   commit() {
     const o = this.orig.trim(), t = this.trans.trim()
+    const same = this.sameLanguage()
     this.orig = ''
     this.trans = ''
+    this.langCounts = {}
     if (o.length > 1) {
-      this.cb.commit(o, t || (this.sameLanguage() ? o : undefined))
+      // Español de verdad (o el idioma de la traducción) se muestra tal cual; otro idioma sin traducción de Soniox
+      // va al respaldo y la fila dice «Traduciendo…» en lugar de repetir el original (decisión 1a, 25 nov).
+      const fallback = !t && !same && !!this.target && !!this.cb.translateFallback
+      this.cb.commit(o, t || (same ? o : undefined))
       this.committedSinceTrans = true
+      if (fallback) {
+        this.fallbacks++
+        this.cb.translateFallback!(o)
+        if (this.fallbacks === 1 || this.fallbacks % 10 === 0) this.cb.diag?.('translate-fallback', { n: this.fallbacks, chars: o.length })
+      }
     }
   }
 }
@@ -383,7 +419,7 @@ export async function startStreamEngine(stream: MediaStream, cb: EngineCallbacks
       turns.setTarget(lang)
       reconnect(`cambio de idioma de la traducción a ${lang ?? 'ninguno'}`, true)
     },
-    stats: () => ({ buffered: ws?.bufferedAmount ?? 0, queued: queue.length, reconnects: reconnectTimes.length }),
+    stats: () => ({ buffered: ws?.bufferedAmount ?? 0, queued: queue.length, reconnects: reconnectTimes.length, translateFallbacks: turns.fallbacks }),
     async stop() {
       if (stopping) return
       stopping = true

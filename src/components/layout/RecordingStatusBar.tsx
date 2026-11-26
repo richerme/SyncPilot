@@ -13,6 +13,7 @@ export default function RecordingStatusBar() {
   const status   = useRecordingStore(s => s.status)
   const duration = useRecordingStore(s => s.duration)
   const stop     = useRecordingStore(s => s.stopRecording)
+  const light    = useRecordingStore(s => s.lightMode)
 
   if (status !== 'recording' && status !== 'paused') return null
 
@@ -32,6 +33,15 @@ export default function RecordingStatusBar() {
           {status === 'paused' ? 'Grabación en pausa' : 'Grabando'}
         </span>
         <span className="font-mono text-xs text-white">{formatDuration(duration)}</span>
+        {light && (
+          <span
+            className="text-[11px] px-2 py-0.5 rounded-full"
+            style={{ background: 'rgba(56,189,248,0.15)', color: '#7DD3FC', border: '1px solid rgba(56,189,248,0.35)' }}
+            title="IA en Vivo está activa: la grabación baja a 1 cuadro por segundo y 720p para que la laptop no se quede sin memoria. El audio queda igual. Al apagar IA en Vivo vuelve a lo normal."
+          >
+            Ligera · 1 fps · 720p
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-2">
